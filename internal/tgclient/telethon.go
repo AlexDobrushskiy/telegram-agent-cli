@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -48,7 +49,7 @@ func ReadTelethonSession(path string) (*TelethonImport, error) {
 		key  []byte
 	)
 	err = db.QueryRow(`SELECT dc_id, server_address, port, auth_key FROM sessions LIMIT 1`).Scan(&dc, &addr, &port, &key)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, output.Usage("%s has no session row (never logged in?)", path)
 	}
 	if err != nil {
