@@ -233,3 +233,71 @@ func TestGuardBlocksLiveWrites(t *testing.T) {
 		t.Fatalf("recorder saw no traffic (%v): it is not in the chain", rec.seen)
 	}
 }
+
+// noResolvePhone fails contacts.resolvePhone before the network and counts attempts.
+type noResolvePhone struct {
+	mu    sync.Mutex
+	tries int
+}
+
+func (b *noResolvePhone) Handle(next tg.Invoker) telegram.InvokeFunc {
+	return func(ctx context.Context, in bin.Encoder, out bin.Decoder) error {
+		if guard.MethodName(in) == "contacts.resolvePhone" {
+			b.mu.Lock()
+			b.tries++
+			b.mu.Unlock()
+			return errors.New("e2e: contacts.resolvePhone is not allowed in this suite")
+		}
+		return next.Invoke(ctx, in, out)
+	}
+}
+
+// TestResolvePhoneFromContacts resolves +phone via the cache/contacts path only.
+func TestResolvePhoneFromContacts(t *testing.T) {
+	home, err := config.DefaultHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := &noResolvePhone{}
+	opts := tgclient.Options{Paths: config.Paths{Home: home}, AppVersion: "telegram-agent-cli e2e", NeedAuth: true,
+		Middlewares: []telegram.Middleware{block}}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	skip := "" // t.Skip must run on the test goroutine, not inside gotd's callback
+	err = tgclient.Run(ctx, opts, func(ctx context.Context, c *tgclient.Conn) error {
+		r, err := c.API.ContactsGetContacts(ctx, 0)
+		if err != nil {
+			return err
+		}
+		list, ok := r.(*tg.ContactsContacts)
+		if !ok {
+			skip = "contacts not returned"
+			return nil
+		}
+		for _, uc := range list.Users {
+			u, ok := uc.(*tg.User)
+			if !ok || u.Phone == "" || u.Self {
+				continue
+			}
+			p, err := c.Session().Resolve(ctx, "+"+u.Phone)
+			if err != nil {
+				return err
+			}
+			if p.ID != u.ID {
+				t.Errorf("+phone resolved to %d, want %d", p.ID, u.ID) // ids only: no phone numbers in logs
+			}
+			return nil
+		}
+		skip = "no contact with a visible phone"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skip != "" {
+		t.Skip(skip)
+	}
+	if block.tries != 0 {
+		t.Fatalf("contacts.resolvePhone was attempted %d times", block.tries)
+	}
+}
