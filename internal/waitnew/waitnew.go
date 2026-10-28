@@ -58,7 +58,7 @@ func Load(path string) (st *State, ok bool, err error) {
 	}
 	st = &State{}
 	if err := json.Unmarshal(b, st); err != nil {
-		return nil, false, fmt.Errorf("state file %s is not valid (delete it to start over): %v", path, err)
+		return nil, false, fmt.Errorf("state file %s is not valid (delete it to start over): %w", path, err)
 	}
 	if st.Version != stateVersion {
 		return nil, false, fmt.Errorf("state file %s has version %d, want %d (delete it to start over)", path, st.Version, stateVersion)

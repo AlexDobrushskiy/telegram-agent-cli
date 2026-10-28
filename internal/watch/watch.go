@@ -108,7 +108,7 @@ func LoadRegistry(path string) (*Registry, error) {
 		return nil, err
 	}
 	if err := json.Unmarshal(b, &r.raw); err != nil {
-		return nil, fmt.Errorf("%s is not a JSON object of watchers: %v", path, err)
+		return nil, fmt.Errorf("%s is not a JSON object of watchers: %w", path, err)
 	}
 	return r, nil
 }
@@ -217,7 +217,7 @@ func LoadState(path string) (*State, error) {
 		Chats         map[string]json.RawMessage `json:"chats"`
 	}
 	if err := json.Unmarshal(b, &raw); err != nil {
-		return nil, fmt.Errorf("%s: %v", path, err)
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	st := &State{ActiveWatcher: strings.TrimSpace(raw.ActiveWatcher), Chats: map[int64]string{}}
 	for k, v := range raw.Chats {
