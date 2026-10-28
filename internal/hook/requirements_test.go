@@ -380,7 +380,8 @@ func TestReqFileTools(t *testing.T) {
 		{"Write", map[string]any{"file_path": "/work/Makefile", "content": "send:\n\tTGAC_READONLY=0 telegram-agent-cli send text\n"}, "TGAC_READONLY"},
 		{"Write", map[string]any{"file_path": "/work/t_test.go", "content": `os.Setenv("TGAC_READONLY", "0")`}, "TGAC_READONLY"},
 		{"Edit", map[string]any{"file_path": testHome + "/.zshrc", "old_string": "x", "new_string": "export TGAC_WATCHER_SESSION=abc"}, "TGAC_WATCHER_SESSION"},
-		{"Write", map[string]any{"file_path": "/work/fix.py", "content": "p = os.path.expanduser('~/.claude/settings.json')"}, "Claude Code settings"},
+		{"Write", map[string]any{"file_path": "/work/fix.py", "content": "p = os.path.expanduser('~/.claude/settings.json')\nopen(p, 'w').write('{}')"}, "Claude Code settings"},
+		{"Write", map[string]any{"file_path": "/work/show.py", "content": "p = os.path.expanduser('~/.claude/settings.json')\nprint(json.load(open(p)))"}, ""},
 
 		// silent
 		{"Write", map[string]any{"file_path": "/work/.claude/settings.local.json", "content": `{"permissions": {"allow": ["Bash(go test:*)"]}}`}, ""},
@@ -414,7 +415,8 @@ func TestReqSettingsBash(t *testing.T) {
 		{`ln -sf /tmp/s.json ~/.claude/settings.json`, "Claude Code settings"},
 		{`tee ~/.claude/settings.json < /tmp/s.json`, "Claude Code settings"},
 		{`git checkout -- .claude/settings.json`, "Claude Code settings"},
-		{`python3 -c "import json; p='/xhome/u/.claude/settings.json'"`, "Claude Code settings"},
+		{`python3 -c "import json; p='/xhome/u/.claude/settings.json'; open(p, 'w').write('{}')"`, "Claude Code settings"},
+		{"python3 - <<'EOF'\nimport json,os\np=os.path.expanduser('~/.claude-2/settings.json')\nd=json.load(open(p)); d.pop('hooks')\nopen(p,'w').write(json.dumps(d))\nEOF", "Claude Code settings"},
 		{`rm ~/.claude/settings*`, "Claude Code settings"},
 		{`cd ~/.claude && echo '{}' > settings.json`, "Claude Code settings"},
 		// silent
@@ -427,4 +429,75 @@ func TestReqSettingsBash(t *testing.T) {
 		{`cp agent.md ~/.claude/agents/`, ""},
 		{`sed -n 1,5p ~/.claude/settings.json`, ""},
 	})
+}
+
+// Regressions from replaying real tool calls (synthetic shapes): ordinary
+// commands must stay silent.
+func TestReqReplayRegressions(t *testing.T) {
+	o := settingsOptions()
+	o.ClaudeConfigDir = testHome + "/.claude-alt"
+	o.WatcherEnvs = []string{"TERM_SESSION_X"}
+	checkReqs(t, o, []reqCase{
+		// 1: unknown expansions and cd are not settings writes
+		{`cd /work; S=out/s1; declare -A V=([1]=a); for n in 1; do cp x raw/assets/${V[$n]}; done`, ""},
+		{`for n in 1 2; do lsof -i tcp:$((8000+10*n)) > /tmp/p$n; done`, ""},
+		{`ssh box 'cd ~/.claude-alt && stat -f "%Sm %N" * .[!.]* 2>/dev/null | sort | tail -3; cd ~/.claude && ls'`, ""},
+		{`cd ~/.claude && cat settings.json | jq .hooks > /tmp/h.json`, ""},
+		{`cat >> log.md <<'EOF'` + "\n## entry\nEOF", ""},
+		{`cd /work && scripts/x.sh --out "$OUT/$NAME"`, ""},
+		{"python3 - <<'EOF'\np='src/install.py'\ns=open(p).read().replace('a','b')\nopen(p,'w').write(s)\nEOF", ""},
+		{"python3 - <<'EOF'\nimport os\np=os.path.join(os.environ.get('CLAUDE_CONFIG_DIR', '~/.claude'), 'x.json')\nprint(p)\nEOF", ""},
+		{`curl -s -X POST -d '{"q":"mutation($m:[In!]!){set(m:$m){key}}","v":{"m":[{"id":"'$P'"}]}}' https://x > out.json`, ""},
+		{`git push origin HEAD`, ""},
+		{`ls ~/.claude/`, ""},
+		{`cp ~/.claude/settings.json "$BK/"`, ""},
+		{`vim -c q ~/.claude/settings.json`, ""},
+		// 2: expanding the watcher variable is fine; assigning it asks
+		{`termctl type --stdin --target "$TERM_SESSION_X" <<< hi`, ""},
+		{`echo ${TERM_SESSION_X:-none}`, ""},
+		{`python3 -c "import os, subprocess; subprocess.run(['tool', '--to', os.environ['TERM_SESSION_X'], 'x'])"`, ""},
+		{`python3 -c "import os; print(os.environ.get('TERM_SESSION_X', ''))"`, ""},
+		{`export TERM_SESSION_X=$(cat state)`, "TERM_SESSION_X"},
+		{`TERM_SESSION_X=abc tool`, "TERM_SESSION_X"},
+		{`python3 -c "import os; os.environ.setdefault('TERM_SESSION_X', 'a')"`, "TERM_SESSION_X"},
+		{`python3 -c "import os; os.environ['TERM_SESSION_X'] = 'a'"`, "TERM_SESSION_X"},
+		// 3: siblings of the data dir and plain listings of an ancestor pass
+		{`ls ~/.config/someapp 2>/dev/null && cat ~/.config/someapp/auth.yml | sed -E 's/(k: ).*/\1<x>/'`, ""},
+		{`grep -rn key ~/.config/someapp`, ""},
+		{`ls -la ~/.config ~`, ""},
+		{`grep -rIn -i 'api.key' ~/.zshrc ~/.config`, "directory tree"},
+		// unknown expansions match one path component, not any number
+		{`for p in a b; do echo "/$p $(curl -s -o /dev/null -w '%{http_code}' https://x/$p)"; done`, ""},
+		{`for F in a b; do ls /$F; done`, ""},
+		{`cat $HOME/$X`, ""},
+		{`cat ~/.config/$X/session.json`, "data dir"},
+		{`grep -r key /$X`, "directory tree"},
+		// a program named by a variable set earlier is resolved
+		{`B=./bin/telegram-agent-cli; $B chats list`, ""},
+		{`B=./bin/telegram-agent-cli; "$B" auth logout`, "auth logout"},
+		// still asks
+		{`echo '{}' > ~/.claude-alt/settings.json`, "Claude Code settings"},
+		{`mv /tmp/s.json /work/.claude/settings.local.json`, "Claude Code settings"},
+	})
+}
+
+func TestLargeCompiledProgramIsNotAScript(t *testing.T) {
+	dir := t.TempDir()
+	big := make([]byte, maxScriptSize+10)
+	big[100] = 0
+	copy(big, "\x7fELF")
+	if err := os.WriteFile(filepath.Join(dir, "tool"), big, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	text := []byte(strings.Repeat("echo hi\n", maxScriptSize/8+10))
+	if err := os.WriteFile(filepath.Join(dir, "huge.sh"), text, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	o := Options{UserHome: "/xhome/u", Cwd: dir}
+	if r := CheckBash("./tool && telegram-agent-cli me", o); len(r) != 0 {
+		t.Errorf("compiled program: %v", r)
+	}
+	if r := CheckBash("bash huge.sh && telegram-agent-cli me", o); !strings.Contains(strings.Join(r, ";"), "can't read") {
+		t.Errorf("huge script next to the binary: %v", r)
+	}
 }

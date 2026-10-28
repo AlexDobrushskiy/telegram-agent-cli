@@ -2,6 +2,7 @@ package hook
 
 import (
 	"bytes"
+	"errors"
 	"regexp"
 	"strings"
 )
@@ -408,6 +409,12 @@ func (s *scanner) argv(words []token, cmd *command, c ctx) {
 		return
 	}
 	prog, args := words[idx], words[idx+1:]
+	if prog.dynamic && len(prog.subs) == 0 {
+		// $B with B set earlier in the command
+		if v, ok := s.expandValue(prog.pat); ok && v != "" && !strings.ContainsAny(v, " \t") {
+			prog = token{kind: tWord, text: v, pat: escMeta(v)}
+		}
+	}
 	if prog.dynamic || prog.glob {
 		s.condAdd(c, "runs a program named by an expansion")
 		return
@@ -647,6 +654,9 @@ func (s *scanner) file(p string, mode fileMode, c ctx) {
 	content, ok := s.written[full]
 	if !ok {
 		b, err := s.o.ReadFile(full)
+		if errors.Is(err, errTooBig) && bytes.IndexByte(b, 0) >= 0 {
+			return // a large compiled program
+		}
 		if err != nil {
 			if !errorsIsNotExist(err) {
 				s.hidden("runs "+base(full)+", which the guard can't read ("+err.Error()+")", false)

@@ -2,6 +2,7 @@
 package hook
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -92,6 +93,9 @@ func DefaultOptions() Options {
 
 const maxScriptSize = 1 << 20
 
+// errTooBig is returned with the file's head when a script is over maxScriptSize.
+var errTooBig = errors.New("larger than 1 MiB")
+
 // readScript reads a script a command runs. Only regular files are opened
 // (non-blocking), so a FIFO or device named as a script cannot stall the hook.
 func readScript(p string) ([]byte, error) {
@@ -106,7 +110,7 @@ func readScript(p string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !st.Mode().IsRegular() || st.Size() > maxScriptSize {
+	if !st.Mode().IsRegular() {
 		return nil, fmt.Errorf("not a script: %s", p)
 	}
 	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NONBLOCK, 0)
@@ -116,6 +120,12 @@ func readScript(p string) ([]byte, error) {
 	defer func() { _ = f.Close() }()
 	if st, err = f.Stat(); err != nil || !st.Mode().IsRegular() {
 		return nil, fmt.Errorf("not a script: %s", p)
+	}
+	if st.Size() > maxScriptSize {
+		// the head only, so the caller can tell a compiled program from a huge script
+		head := make([]byte, 8192)
+		n, _ := io.ReadFull(f, head)
+		return head[:n], fmt.Errorf("%w: %s", errTooBig, p)
 	}
 	return io.ReadAll(io.LimitReader(f, maxScriptSize))
 }

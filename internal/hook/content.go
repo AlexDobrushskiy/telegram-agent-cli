@@ -17,7 +17,17 @@ var settingsTokenRe = regexp.MustCompile(`(?i)\bhooks\b|PreToolUse|disableAllHoo
 	regexp.QuoteMeta(BinaryName))
 
 // settingsCodeRe is code that names a Claude Code settings file.
-var settingsCodeRe = regexp.MustCompile(`(?i)\.claude['"]?\s*[/,]\s*['"]?settings(?:\.local)?\.json|managed-settings\.json|CLAUDE_CONFIG_DIR`)
+var settingsCodeRe = regexp.MustCompile(`(?i)\.claude[\w-]*['"]?\s*[/,]\s*['"]?settings(?:\.local)?\.json|managed-settings\.json`)
+
+// fileWriteRe is code that writes, moves or deletes a file.
+var fileWriteRe = regexp.MustCompile(`open\([^)]*,\s*(?:mode\s*=\s*)?['"][rwax+b]*[wax+]|\.write_(?:text|bytes)\(|` +
+	`writeFile(?:Sync)?\(|os\.(?:replace|rename|remove|unlink)\(|shutil\.(?:copy|move)|\.unlink\(|File\.write|` +
+	`os\.WriteFile|fs\.(?:rm|unlink|rename)|sed\s+-i`)
+
+// writesSettings reports whether code names a settings file and writes a file.
+func writesSettings(code string) bool {
+	return settingsCodeRe.MatchString(code) && fileWriteRe.MatchString(code)
+}
 
 var docExts = set(".md", ".markdown", ".mdx", ".txt", ".rst", ".adoc", ".org")
 
@@ -219,51 +229,63 @@ func CheckContent(tool string, ti map[string]any, o Options) string {
 		if segmentRe.MatchString(t) {
 			s.reasons.add(reasonDataDir)
 		}
-		if settingsCodeRe.MatchString(t) {
+		if writesSettings(t) {
 			s.reasons.add("writes code that touches Claude Code settings")
 		}
 	}
 	return strings.Join(s.reasons.list, "; ")
 }
 
-// settingsReaders only read the files they are given.
-var settingsReaders = set("cat", "less", "more", "head", "tail", "bat", "jq", "grep", "egrep", "fgrep", "rg",
-	"ag", "ack", "wc", "diff", "cmp", "ls", "stat", "file", "md5", "md5sum", "shasum", "sha256sum", "echo",
-	"printf", "code", "open", "subl", "realpath", "readlink", "dirname", "basename", "test", "[", "du",
-	"tree", "hexdump", "xxd", "od", "strings", "column", "sort", "uniq")
+// Bash writes to a settings file: a redirect onto it, or one of these programs
+// with it in a writing position. Reading or mentioning it is fine.
+var (
+	settingsMovers  = set("mv", "rm", "unlink", "truncate", "shred", "touch", "chmod", "chown", "sponge", "tee")
+	settingsCopiers = set("cp", "install", "rsync", "ditto", "scp", "ln", "gcp")
+	settingsInPlace = set("sed", "gsed", "perl", "ruby", "yq")
+	gitWrites       = set("checkout", "restore", "rm", "mv", "stash", "reset")
+)
 
-var gitReads = set("diff", "show", "log", "status", "blame", "grep", "ls-files", "cat-file", "check-ignore")
-
-var copiers = set("cp", "install", "rsync", "ditto", "scp", "ln")
-
-// settingsWrites reports whether a command may change a Claude Code settings file.
-func (s *scanner) settingsWrites(cmd *command, idx int, data map[int]bool) {
-	target := func(w token) bool {
-		p, ok := s.expandPat(w.pat)
-		if !ok {
-			return false
-		}
-		for _, alt := range expandBraces(p) {
-			if !hasGlob(alt) {
-				if settingsTarget(unescape(alt), s.o) {
-					return true
-				}
-				continue
-			}
-			c := splitPat(alt)
-			if len(c) == 0 {
-				continue
-			}
-			last := c[len(c)-1]
-			if compMatch(last, ".claude") || len(c) > 1 && compMatch(c[len(c)-2], ".claude") &&
-				(compMatch(last, "settings.json") || compMatch(last, "settings.local.json")) {
-				return true
-			}
-		}
+// settingsPath reports whether a word names a settings file (or a .claude dir
+// when dirs is set) as a concrete path, or a glob whose directory is a literal
+// .claude dir and whose name matches settings*.json.
+func (s *scanner) settingsPath(w token, dirs bool) bool {
+	p, ok := s.expandPat(w.pat)
+	if !ok {
 		return false
 	}
+	for _, alt := range expandBraces(p) {
+		if !hasGlob(alt) {
+			full := unescape(alt)
+			if settingsTarget(full, s.o) && (dirs || !isClaudeDir(full, s.o)) {
+				return true
+			}
+			continue
+		}
+		c := splitPat(alt)
+		if n := len(c); n > 1 && !hasGlob(c[n-2]) && isClaudeDir("/"+strings.Join(c[:n-1], "/"), s.o) &&
+			(compMatch(c[n-1], "settings.json") || compMatch(c[n-1], "settings.local.json")) {
+			return true
+		}
+	}
+	return false
+}
+
+func isClaudeDir(p string, o Options) bool {
+	if strings.EqualFold(filepath.Base(p), ".claude") {
+		return true
+	}
+	for _, c := range claudeDirs(o) {
+		if within(p, c) && within(c, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// settingsWrites asks when a command writes a Claude Code settings file.
+func (s *scanner) settingsWrites(cmd *command, idx int, data map[int]bool) {
 	for _, w := range cmd.outRedirs {
-		if target(w) {
+		if s.settingsPath(w, false) {
 			s.reasons.add(reasonSettings)
 		}
 	}
@@ -272,43 +294,37 @@ func (s *scanner) settingsWrites(cmd *command, idx int, data map[int]bool) {
 	}
 	prog := base(cmd.words[idx].text)
 	args := cmd.words[idx+1:]
+	var ops []token
 	inPlace := false
-	for _, a := range args {
+	for i, a := range args {
 		t := a.text
 		if t == "--in-place" || strings.HasPrefix(t, "--in-place=") || len(t) > 1 && t[0] == '-' && t[1] != '-' && strings.Contains(t, "i") {
 			inPlace = true
 		}
-	}
-	var operands []int
-	for i, a := range args {
-		if !data[idx+1+i] && !strings.HasPrefix(a.text, "-") {
-			operands = append(operands, i)
+		if !data[idx+1+i] && !strings.HasPrefix(t, "-") {
+			ops = append(ops, a)
 		}
 	}
-	for n, i := range operands {
-		if !target(args[i]) {
-			continue
-		}
-		write := true
-		switch {
-		case prog == "git":
-			write = len(operands) > 0 && !gitReads[args[operands[0]].text]
-		case copiers[prog]:
-			write = prog == "ln" || n == len(operands)-1
-		case prog == "sed" || prog == "perl" || prog == "ruby" || prog == "yq":
-			write = inPlace
-		case prog == "find":
-			write = false
-			for _, a := range args {
-				switch a.text {
-				case "-delete", "-exec", "-execdir", "-ok", "-okdir":
-					write = true
-				}
+	var targets []token
+	dirs := false
+	switch {
+	case settingsMovers[prog]:
+		targets, dirs = ops, prog == "mv" || prog == "rm"
+	case settingsCopiers[prog] && len(ops) > 1:
+		targets, dirs = ops[len(ops)-1:], true
+	case settingsInPlace[prog] && inPlace:
+		targets = ops
+	case prog == "dd":
+		for _, a := range args {
+			if v, ok := strings.CutPrefix(a.text, "of="); ok {
+				targets = append(targets, token{text: v, pat: a.pat[3:]})
 			}
-		case settingsReaders[prog]:
-			write = false
 		}
-		if write {
+	case prog == "git" && len(ops) > 0 && gitWrites[ops[0].text]:
+		targets = ops[1:]
+	}
+	for _, t := range targets {
+		if s.settingsPath(t, dirs) {
 			s.reasons.add(reasonSettings)
 		}
 	}

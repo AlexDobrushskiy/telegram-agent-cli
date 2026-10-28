@@ -260,7 +260,7 @@ func TestCheckBashAsks(t *testing.T) {
 		"go run -tags e2e ./cmd/telegram-agent-cli/ auth logout":                                       "auth logout",
 		"go run github.com/AlexDobrushskiy/telegram-agent-cli/cmd/telegram-agent-cli@latest send text": "send text",
 		// indirection
-		"BIN=./bin/telegram-agent-cli; $BIN send text": "expansion",
+		"BIN=./bin/telegram-agent-cli; $BIN send text": "send text",
 		`"$(which telegram-agent-cli)" send text`:      "expansion",
 		"alias t='telegram-agent-cli send text'":       "alias",
 		"bash scripts/bad.sh":                          "send text",

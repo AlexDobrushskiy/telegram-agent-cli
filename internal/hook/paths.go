@@ -94,8 +94,8 @@ func (s *scanner) expandPat(pat string) (string, bool) {
 	return p, true
 }
 
-// splitPat splits an absolute pattern into cleaned components; a component
-// with an unknown expansion becomes "**" (any number of components).
+// splitPat splits an absolute pattern into cleaned components; an unknown
+// expansion matches within one component, like *.
 func splitPat(p string) []string {
 	var out []string
 	for _, c := range strings.Split(p, "/") {
@@ -106,7 +106,7 @@ func splitPat(p string) []string {
 				out = out[:len(out)-1]
 			}
 		case strings.ContainsRune(c, markUnknown):
-			out = append(out, "**")
+			out = append(out, strings.ReplaceAll(c, string(rune(markUnknown)), "*"))
 		default:
 			out = append(out, c)
 		}

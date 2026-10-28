@@ -163,13 +163,34 @@ func assignAfter(text string, k, i int) assign {
 		return assign{}
 	case strings.HasPrefix(r, "+="):
 		return assign{ok: true}
-	case strings.HasPrefix(r, "="), strings.HasPrefix(r, ":"), strings.HasPrefix(r, ","):
+	case strings.HasPrefix(r, ","):
+		if !inSetter(text[:k]) {
+			return assign{} // get('NAME', default), a list element: a read
+		}
+		op = 1
+	case strings.HasPrefix(r, "="), strings.HasPrefix(r, ":"):
 		op = 1
 	default:
 		return assign{}
 	}
 	v, known := codeValue(r[op:])
 	return assign{ok: true, known: known, value: v}
+}
+
+// inSetter reports whether the text before a quoted name opens a call to an
+// environment setter: setdefault(, putenv(, Setenv(, setenv(.
+func inSetter(before string) bool {
+	before = strings.TrimRight(before, "'\"` \t")
+	if !strings.HasSuffix(before, "(") {
+		return false
+	}
+	before = strings.TrimRight(strings.TrimSuffix(before, "("), " \t")
+	n := len(before)
+	for n > 0 && isNameChar(before[n-1]) {
+		n--
+	}
+	f := strings.ToLower(before[n:])
+	return strings.Contains(f, "set") || strings.Contains(f, "put")
 }
 
 // shellValue reads the value of a NAME=value shell word. known is false when
