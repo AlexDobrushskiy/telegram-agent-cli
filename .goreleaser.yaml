@@ -1,0 +1,51 @@
+version: 2
+
+project_name: telegram-agent-cli
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: telegram-agent-cli
+    main: ./cmd/telegram-agent-cli
+    binary: telegram-agent-cli
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    # same -X targets as the Makefile
+    ldflags:
+      - -s -w
+      - -X github.com/AlexDobrushskiy/telegram-agent-cli/internal/cli.Version={{ .Version }}
+      - -X github.com/AlexDobrushskiy/telegram-agent-cli/internal/cli.Commit={{ .ShortCommit }}
+      - -X github.com/AlexDobrushskiy/telegram-agent-cli/internal/cli.Date={{ .Date }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+      - SECURITY.md
+      - skills/**/*
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge "
+
+release:
+  draft: true
