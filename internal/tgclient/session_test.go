@@ -589,3 +589,79 @@ func TestDownloadMedia(t *testing.T) {
 	}
 	srv.assertNoWrites()
 }
+
+// addGroup adds a basic group with message ids 1..n; every mentionEvery-th mentions the owner.
+func (s *fakeServer) addGroup(id int64, title string, n, mentionEvery, unreadMentions int, newest int) {
+	s.chats = append(s.chats, &tg.Chat{ID: id, Title: title, Photo: &tg.ChatPhotoEmpty{}})
+	for i := 1; i <= n; i++ {
+		s.msgs[-id] = append(s.msgs[-id], &tg.Message{ID: i, PeerID: &tg.PeerChat{ChatID: id}, FromID: &tg.PeerUser{UserID: 10},
+			Date: msgDate(newest - n + i), Message: fmt.Sprintf("%s %d", title, i), Mentioned: i%mentionEvery == 0})
+	}
+	s.dialogs = append(s.dialogs, &tg.Dialog{Peer: &tg.PeerChat{ChatID: id}, TopMessage: n, UnreadMentionsCount: unreadMentions})
+}
+
+func TestMentionsAccountWide(t *testing.T) {
+	ctx := context.Background()
+	srv := newServer(t)
+	srv.users = append(srv.users, &tg.User{ID: 10, FirstName: "Ann", AccessHash: 77})
+	// Most recent first: a 1:1 chat (never scanned), then three groups.
+	srv.msgs[10] = []*tg.Message{{ID: 1, PeerID: &tg.PeerUser{UserID: 10}, Date: msgDate(500), Message: "dm", Mentioned: true}}
+	srv.dialogs = append(srv.dialogs, &tg.Dialog{Peer: &tg.PeerUser{UserID: 10}, TopMessage: 1, UnreadMentionsCount: 1})
+	srv.addGroup(20, "alpha", 10, 5, 0, 400) // mentions at ids 5, 10
+	srv.addGroup(21, "beta", 10, 3, 2, 300)  // mentions at ids 3, 6, 9
+	srv.addGroup(22, "gamma", 10, 2, 0, 200) // only reached with --scan ≥ 3
+	srv.handlers["messages.searchGlobal"] = func(bin.Encoder) (bin.Encoder, error) {
+		t.Fatal("searchGlobal must not be used for mentions")
+		return nil, nil
+	}
+	s := srv.session(true)
+
+	got, err := s.Mentions(ctx, nil, MentionsQuery{Limit: 4, Scan: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chats []int64
+	for _, m := range got {
+		chats = append(chats, m.ChatID)
+	}
+	// Newest first across alpha (ids 10, 5) and beta (9, 6, 3), trimmed to 4.
+	if fmt.Sprint(ids(got)) != "[10 5 9 6]" || fmt.Sprint(chats) != "[-20 -20 -21 -21]" {
+		t.Fatalf("scan=2: ids %v chats %v", ids(got), chats)
+	}
+	if n := srv.calls("messages.search"); n != 2 {
+		t.Fatalf("searched %d chats, want 2", n)
+	}
+	if got, _ := s.Mentions(ctx, nil, MentionsQuery{Limit: 100, Scan: 3}); len(got) != 2+3+5 {
+		t.Fatalf("scan=3: %d mentions", len(got))
+	}
+
+	// Unread: only dialogs with unread mentions (the 1:1 chat and beta), via getUnreadMentions.
+	before := srv.calls("messages.search")
+	got, err = s.Mentions(ctx, nil, MentionsQuery{Unread: true, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(ids(got)) != "[1 9 6 3]" || srv.calls("messages.getUnreadMentions") != 2 || srv.calls("messages.search") != before {
+		t.Fatalf("unread: ids %v calls %v", ids(got), srv.seen)
+	}
+	if srv.calls("messages.readMentions") != 0 {
+		t.Fatal("mentions were marked read")
+	}
+	srv.assertNoWrites()
+}
+
+func TestMentionsSkipsUnreadableChat(t *testing.T) {
+	srv := newServer(t)
+	srv.addGroup(20, "alpha", 4, 2, 0, 400)
+	srv.addGroup(21, "gone", 4, 2, 0, 300)
+	srv.handlers["messages.search"] = func(in bin.Encoder) (bin.Encoder, error) {
+		if PeerMarkedID(inputToPeer(in.(*tg.MessagesSearchRequest).Peer)) == -21 {
+			return nil, tgerr.New(400, "CHAT_ID_INVALID")
+		}
+		return srv.builtin(in)
+	}
+	got, err := srv.session(true).Mentions(context.Background(), nil, MentionsQuery{Limit: 10})
+	if err != nil || fmt.Sprint(ids(got)) != "[4 2]" {
+		t.Fatalf("%v %v", ids(got), err)
+	}
+}

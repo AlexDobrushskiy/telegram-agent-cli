@@ -214,7 +214,24 @@ func (f *Fake) MessagesByID(_ context.Context, p *tgclient.Peer, ids []int) ([]t
 
 func (f *Fake) Mentions(_ context.Context, p *tgclient.Peer, q tgclient.MentionsQuery) ([]tgclient.Message, error) {
 	f.call("Mentions")
-	return f.newestFirst(p, func(m tgclient.Message) bool { return m.Mentioned }, q.Limit), nil
+	scanned := map[int64]bool{}
+	if p == nil {
+		n := q.Scan
+		if n <= 0 {
+			n = tgclient.DefaultMentionScan
+		}
+		for _, d := range f.Dialogs {
+			if (q.Unread && d.Mentions > 0) || (!q.Unread && d.Peer.IsGroup() && n > 0) {
+				scanned[d.ID] = true
+				if !q.Unread {
+					n--
+				}
+			}
+		}
+	}
+	return f.newestFirst(p, func(m tgclient.Message) bool {
+		return m.Mentioned && (p != nil || scanned[m.ChatID])
+	}, q.Limit), nil
 }
 
 func (f *Fake) SearchContacts(_ context.Context, query string, limit int) (*tgclient.ContactsResult, error) {

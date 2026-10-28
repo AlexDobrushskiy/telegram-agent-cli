@@ -27,6 +27,7 @@ type pageResult struct {
 	users    []tg.UserClass
 	chats    []tg.ChatClass
 	more     bool // a slice: more pages may exist
+	count    int  // total matches server-side (0 = unknown)
 	nextRate int
 }
 
@@ -63,9 +64,9 @@ func unpackMessages(r tg.MessagesMessagesClass) pageResult {
 	case *tg.MessagesMessages:
 		return pageResult{messages: v.Messages, users: v.Users, chats: v.Chats}
 	case *tg.MessagesMessagesSlice:
-		return pageResult{messages: v.Messages, users: v.Users, chats: v.Chats, more: true, nextRate: v.NextRate}
+		return pageResult{messages: v.Messages, users: v.Users, chats: v.Chats, more: true, count: v.Count, nextRate: v.NextRate}
 	case *tg.MessagesChannelMessages:
-		return pageResult{messages: v.Messages, users: v.Users, chats: v.Chats, more: true}
+		return pageResult{messages: v.Messages, users: v.Users, chats: v.Chats, more: true, count: v.Count}
 	}
 	return pageResult{}
 }
@@ -127,6 +128,7 @@ func (it iterSpec) run(ctx context.Context) ([]Message, error) {
 	}
 
 	var out []Message
+	seen := 0 // messages received so far
 	for len(out) < it.limit {
 		p.limit = min(it.limit-len(out), chunkSize)
 		if it.fromID != 0 {
@@ -140,6 +142,7 @@ func (it iterSpec) run(ctx context.Context) ([]Message, error) {
 			return out, err
 		}
 		ents := it.onPage(r)
+		seen += len(r.messages)
 		msgs := r.messages
 		if it.reverse {
 			msgs = make([]tg.MessageClass, len(r.messages))
@@ -170,7 +173,7 @@ func (it iterSpec) run(ctx context.Context) ([]Message, error) {
 				break
 			}
 		}
-		if done || !r.more || len(r.messages) == 0 || lastRaw == nil {
+		if done || !r.more || len(r.messages) == 0 || lastRaw == nil || (r.count > 0 && seen >= r.count) {
 			break
 		}
 		if first, _ := msgIDDate(r.messages[0]); !it.reverse && first <= p.limit {

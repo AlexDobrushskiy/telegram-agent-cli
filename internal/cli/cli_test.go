@@ -241,6 +241,14 @@ func TestMessagesShowContextSearchMentions(t *testing.T) {
 	if fmt.Sprint(idsOf(d["messages"])) != "[3]" || d["unread_only"] != true {
 		t.Fatalf("mentions %v", d)
 	}
+	if got := idsOf(h.ok("messages", "mentions")["messages"]); fmt.Sprint(got) != "[3]" {
+		t.Fatalf("account-wide mentions %v", got)
+	}
+	// --scan 1 visits only the most recent group (Book Club), which has no mentions.
+	if got := idsOf(h.ok("messages", "mentions", "--scan", "1")["messages"]); got != nil {
+		t.Fatalf("scan=1 mentions %v", got)
+	}
+	h.fail(2, output.CodeUsage, "messages", "mentions", "--scan", "0")
 }
 
 func TestSendRespectsReadOnly(t *testing.T) {

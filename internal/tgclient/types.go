@@ -67,6 +67,7 @@ type SearchQuery struct {
 type MentionsQuery struct {
 	Unread bool // messages.getUnreadMentions (does not mark them read)
 	Limit  int
+	Scan   int // without a chat and Unread: how many recent groups to search (0 = default)
 }
 
 // Peer is a resolved chat or user. AccessHash never leaves the process.

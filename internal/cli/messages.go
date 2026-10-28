@@ -247,17 +247,17 @@ func (a *App) messagesContextCmd() *cobra.Command {
 
 func (a *App) messagesMentionsCmd() *cobra.Command {
 	var (
-		chat   string
-		unread bool
-		limit  int
+		chat        string
+		unread      bool
+		limit, scan int
 	)
 	c := &cobra.Command{
 		Use:   "mentions",
 		Short: "Messages that @-mention or reply to you (does not mark them read)",
 		Args:  noArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
-			if limit <= 0 {
-				return output.Usage("--limit must be positive")
+			if limit <= 0 || scan <= 0 {
+				return output.Usage("--limit and --scan must be positive")
 			}
 			return a.withSession(c.Context(), func(ctx context.Context, t tgclient.Telegram) (any, error) {
 				var p *tgclient.Peer
@@ -267,7 +267,7 @@ func (a *App) messagesMentionsCmd() *cobra.Command {
 						return nil, err
 					}
 				}
-				msgs, err := t.Mentions(ctx, p, tgclient.MentionsQuery{Unread: unread, Limit: limit})
+				msgs, err := t.Mentions(ctx, p, tgclient.MentionsQuery{Unread: unread, Limit: limit, Scan: scan})
 				if err != nil {
 					return nil, err
 				}
@@ -278,6 +278,8 @@ func (a *App) messagesMentionsCmd() *cobra.Command {
 	c.Flags().StringVar(&chat, "chat", "", "limit to one chat (else all chats); "+chatFlagHelp)
 	c.Flags().BoolVar(&unread, "unread", false, "only unread mentions (messages.getUnreadMentions)")
 	c.Flags().IntVar(&limit, "limit", 30, "max messages")
+	c.Flags().IntVar(&scan, "scan", tgclient.DefaultMentionScan,
+		"without --chat/--unread: how many most recent groups to search")
 	return c
 }
 

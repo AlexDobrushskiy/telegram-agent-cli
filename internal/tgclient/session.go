@@ -337,35 +337,56 @@ func (s *Session) MessagesByID(ctx context.Context, p *Peer, ids []int) ([]Messa
 	return out, nil
 }
 
+// DefaultMentionScan is how many recent groups an account-wide mention search visits.
+const DefaultMentionScan = 50
+
+// Mentions never marks anything read. Without a chat it visits dialogs one by one:
+// messages.searchGlobal rejects the my-mentions filter (INPUT_FILTER_INVALID).
 func (s *Session) Mentions(ctx context.Context, p *Peer, q MentionsQuery) ([]Message, error) {
-	if !q.Unread {
+	if p != nil {
+		if q.Unread {
+			return s.unreadMentions(ctx, p, q.Limit)
+		}
 		return s.search(ctx, p, SearchQuery{Limit: q.Limit}, &tg.InputMessagesFilterMyMentions{})
 	}
-	if p != nil {
-		return s.unreadMentions(ctx, p, q.Limit)
+	scan := q.Scan
+	if scan <= 0 {
+		scan = DefaultMentionScan
 	}
+	// Unread: every dialog with unread mentions. Otherwise: the most recent groups.
 	var peers []Peer
 	err := s.IterDialogs(ctx, FolderAll, func(d Dialog) bool {
-		if d.Mentions > 0 {
+		switch {
+		case q.Unread && d.Mentions > 0:
+			peers = append(peers, d.Peer)
+		case !q.Unread && d.Peer.IsGroup():
 			peers = append(peers, d.Peer)
 		}
-		return true
+		return q.Unread || len(peers) < scan
 	})
 	if err != nil {
 		return nil, err
 	}
 	var out []Message
 	for i := range peers {
-		if len(out) >= q.Limit {
-			break
+		var msgs []Message
+		if q.Unread {
+			msgs, err = s.unreadMentions(ctx, &peers[i], q.Limit)
+		} else {
+			msgs, err = s.search(ctx, &peers[i], SearchQuery{Limit: q.Limit}, &tg.InputMessagesFilterMyMentions{})
 		}
-		msgs, err := s.unreadMentions(ctx, &peers[i], q.Limit-len(out))
+		if tgerr.IsCode(err, 400, 403) {
+			continue // chat became unreadable (left, private, banned): skip it
+		}
 		if err != nil {
-			return out, err
+			return nil, err
 		}
 		out = append(out, msgs...)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Time.After(out[j].Time) })
+	if len(out) > q.Limit {
+		out = out[:q.Limit]
+	}
 	return out, nil
 }
 
