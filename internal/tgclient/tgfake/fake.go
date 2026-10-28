@@ -33,6 +33,10 @@ type Fake struct {
 	Calls map[string]int
 	// Now is the clock for sent messages (default time.Now).
 	Now func() time.Time
+	// Mutual marks users as mutual contacts (PeerInfo).
+	Mutual map[int64]bool
+	// Recency orders IterDialogs like Telegram: pinned, then newest top message first.
+	Recency bool
 }
 
 var _ tgclient.Telegram = (*Fake)(nil)
@@ -79,9 +83,35 @@ func (f *Fake) Self(context.Context) (*tgclient.User, error) {
 	return &u, nil
 }
 
+// IterDialogs fills TopMessage and Last from the stored messages, as Telegram would.
 func (f *Fake) IterDialogs(_ context.Context, folder tgclient.Folder, fn func(tgclient.Dialog) bool) error {
 	f.call("IterDialogs")
-	for _, d := range f.Dialogs {
+	f.mu.Lock()
+	dialogs := append([]tgclient.Dialog(nil), f.Dialogs...)
+	f.mu.Unlock()
+	top := map[int64]time.Time{}
+	for i := range dialogs {
+		d := &dialogs[i]
+		msgs := f.sorted(d.ID)
+		if len(msgs) == 0 {
+			continue
+		}
+		m := msgs[len(msgs)-1]
+		d.TopMessage = max(d.TopMessage, m.ID)
+		top[d.ID] = m.Time
+		if d.Last == nil {
+			d.Last = &tgclient.LastMessage{ID: m.ID, Date: m.Date, FromMe: m.FromMe, Text: m.Text}
+		}
+	}
+	if f.Recency {
+		sort.SliceStable(dialogs, func(i, j int) bool {
+			if dialogs[i].Pinned != dialogs[j].Pinned {
+				return dialogs[i].Pinned
+			}
+			return top[dialogs[i].ID].After(top[dialogs[j].ID])
+		})
+	}
+	for _, d := range dialogs {
 		if (folder == tgclient.FolderMain && d.Archived) || (folder == tgclient.FolderArchive && !d.Archived) {
 			continue
 		}
@@ -115,7 +145,14 @@ func (f *Fake) Resolve(_ context.Context, ref string) (*tgclient.Peer, error) {
 func (f *Fake) PeerInfo(_ context.Context, p *tgclient.Peer) (*tgclient.ChatInfo, error) {
 	f.call("PeerInfo")
 	about := ""
-	return &tgclient.ChatInfo{ID: p.ID, Name: p.Name, Type: p.Type, About: &about}, nil
+	info := &tgclient.ChatInfo{ID: p.ID, Name: p.Name, Type: p.Type, About: &about}
+	if p.Type == "user" || p.Type == "bot" {
+		f.mu.Lock()
+		mutual := f.Mutual[p.ID]
+		f.mu.Unlock()
+		info.Contact, info.MutualContact = &mutual, &mutual
+	}
+	return info, nil
 }
 
 func (f *Fake) sorted(chat int64) []tgclient.Message {

@@ -7,8 +7,10 @@ package guard
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"unicode"
 	"unicode/utf8"
 
@@ -158,12 +160,37 @@ func Check(req any, readOnly, authMode bool) error {
 	return nil
 }
 
+// MethodSendMessage is the RPC a watcher reply is granted (see AllowOnce).
+const MethodSendMessage = "messages.sendMessage"
+
+type grantKey struct{}
+
+// grant lets one request named method through read-only mode.
+type grant struct {
+	method string
+	used   atomic.Bool
+}
+
+func (g *grant) take(name string) bool {
+	return g != nil && name != "" && name == g.method && g.used.CompareAndSwap(false, true)
+}
+
+// AllowOnce returns a ctx under which exactly one request named method passes
+// read-only mode. Other methods, later calls and always-denied methods stay blocked.
+func AllowOnce(ctx context.Context, method string) context.Context {
+	return context.WithValue(ctx, grantKey{}, &grant{method: method})
+}
+
 // Middleware is the gotd middleware; readOnly is evaluated per call.
 func Middleware(readOnly func() bool, authMode bool) telegram.Middleware {
 	return telegram.MiddlewareFunc(func(next tg.Invoker) telegram.InvokeFunc {
 		return func(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
 			if err := Check(input, readOnly(), authMode); err != nil {
-				return err
+				var be *BlockedError
+				g, _ := ctx.Value(grantKey{}).(*grant)
+				if !errors.As(err, &be) || be.Always || !g.take(MethodName(input)) {
+					return err
+				}
 			}
 			return next.Invoke(ctx, input, output)
 		}

@@ -12,14 +12,22 @@ import (
 
 const lockPoll = 300 * time.Millisecond
 
-// Lock is the data dir flock: one process talks to Telegram at a time.
+// Lock is an flock on a file; the data dir's .lock lets one process talk to Telegram at a time.
 type Lock struct {
 	path string
+	busy string // what holds it, for the lock_busy message
 	f    *os.File
 }
 
 // NewLock returns an unlocked Lock on the data dir's .lock file.
-func (p Paths) NewLock() *Lock { return &Lock{path: p.Lock()} }
+func (p Paths) NewLock() *Lock {
+	return &Lock{path: p.Lock(), busy: "another telegram-agent-cli is talking to Telegram"}
+}
+
+// NewWatchLock returns the lock that serialises watcher check-and-send runs.
+func (p Paths) NewWatchLock() *Lock {
+	return &Lock{path: p.WatchLock(), busy: "another 'watch reply' is running"}
+}
 
 // Acquire waits up to wait for the exclusive lock; a timeout is a lock_busy error.
 func (l *Lock) Acquire(ctx context.Context, wait time.Duration) error {
@@ -43,8 +51,7 @@ func (l *Lock) Acquire(ctx context.Context, wait time.Duration) error {
 		}
 		if !time.Now().Before(deadline) {
 			f.Close()
-			return output.LockBusy("another telegram-agent-cli is talking to Telegram (waited %.0fs; set %s to wait longer)",
-				wait.Seconds(), EnvLockWait)
+			return output.LockBusy("%s (waited %.0fs; set %s to wait longer)", l.busy, wait.Seconds(), EnvLockWait)
 		}
 		select {
 		case <-ctx.Done():

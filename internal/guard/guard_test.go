@@ -242,3 +242,32 @@ func TestMiddleware(t *testing.T) {
 		t.Fatalf("calls = %d, want 2", next.calls)
 	}
 }
+
+func TestAllowOnce(t *testing.T) {
+	next := &countingInvoker{}
+	inv := Middleware(func() bool { return true }, false).Handle(next)
+	ctx := AllowOnce(context.Background(), MethodSendMessage)
+
+	for _, req := range []bin.Encoder{
+		&tg.MessagesReadHistoryRequest{Peer: peer},
+		&tg.MessagesSendMediaRequest{Peer: peer},
+		&tg.AuthAcceptLoginTokenRequest{},
+		&tg.InvokeWithLayerRequest{Query: &tg.MessagesSendMessageRequest{Peer: peer}},
+	} {
+		if err := inv.Invoke(ctx, req, nil); err == nil {
+			t.Fatalf("%T passed with a sendMessage grant", req)
+		}
+	}
+	if err := inv.Invoke(ctx, &tg.MessagesSendMessageRequest{Peer: peer}, nil); err != nil {
+		t.Fatalf("granted send blocked: %v", err)
+	}
+	if err := inv.Invoke(ctx, &tg.MessagesSendMessageRequest{Peer: peer}, nil); err == nil {
+		t.Fatal("grant allowed a second send")
+	}
+	if err := inv.Invoke(context.Background(), &tg.MessagesSendMessageRequest{Peer: peer}, nil); err == nil {
+		t.Fatal("send passed without a grant")
+	}
+	if next.calls != 1 {
+		t.Fatalf("calls = %d, want 1", next.calls)
+	}
+}

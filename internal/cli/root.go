@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -42,6 +43,39 @@ type App struct {
 	StdinIsTerminal func() bool
 	// ReadSecret reads a secret line without echo when on a terminal.
 	ReadSecret func(prompt string) (string, error)
+
+	// Now, Sleep and Getenv default to the real clock and environment when nil.
+	Now    func() time.Time
+	Sleep  func(ctx context.Context, d time.Duration) error
+	Getenv func(key string) string
+}
+
+func (a *App) now() time.Time {
+	if a.Now != nil {
+		return a.Now()
+	}
+	return time.Now()
+}
+
+func (a *App) sleep(ctx context.Context, d time.Duration) error {
+	if a.Sleep != nil {
+		return a.Sleep(ctx, d)
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func (a *App) getenv(key string) string {
+	if a.Getenv != nil {
+		return a.Getenv(key)
+	}
+	return os.Getenv(key)
 }
 
 // New returns an App wired to the real terminal and Telegram.
