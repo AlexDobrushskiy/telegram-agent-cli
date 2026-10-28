@@ -92,13 +92,16 @@ type scanner struct {
 	cond    []string          // reasons that count only if the command mentions the binary
 	files   map[string]bool
 	env     map[string]envKind // protected variables
+	dirs    [][]string         // data dirs as path components
+	st      pathState
 }
 
 func newScanner(o Options) *scanner {
 	if o.ReadFile == nil {
 		o.ReadFile = readScript
 	}
-	return &scanner{o: o, dirRes: dirPatterns(o), written: map[string]string{}, files: map[string]bool{}, env: envNames(o)}
+	return &scanner{o: o, dirRes: dirPatterns(o), written: map[string]string{}, files: map[string]bool{}, env: envNames(o),
+		dirs: dataDirComps(o), st: newPathState(o)}
 }
 
 // scanTop analyses the command and returns the text the text rules should see.
@@ -136,6 +139,15 @@ func blank(s string, ranges [][2]int) string {
 		}
 	}
 	return string(b)
+}
+
+// abs makes p absolute against the command's current directory.
+func (s *scanner) abs(p string) string {
+	o := s.o
+	if s.st.cwd != "" {
+		o.Cwd = s.st.cwd
+	}
+	return absPath(p, o)
 }
 
 // condAdd records a reason that only matters when the binary is mentioned.
@@ -200,7 +212,7 @@ func (s *scanner) command(cmd *command, c ctx) {
 				s.inert = append(s.inert, [2]int{h.start, h.end})
 			}
 			for _, t := range targets {
-				s.written[absPath(t, s.o)] = h.body
+				s.written[s.abs(t)] = h.body
 			}
 		}
 	}
@@ -211,7 +223,9 @@ func (s *scanner) command(cmd *command, c ctx) {
 		}
 	}
 	s.envTargets(cmd.words, idx)
+	s.pathRules(cmd, idx, data)
 	s.argv(cmd.words, cmd, c)
+	s.track(cmd, idx)
 }
 
 // dataFlags carry message text (commit messages, PR titles and bodies), not code.
@@ -542,7 +556,7 @@ func (s *scanner) file(p string, mode fileMode, c ctx) {
 	if c.depth > maxDepth {
 		return
 	}
-	full := absPath(p, s.o)
+	full := s.abs(p)
 	if s.files[full] {
 		return
 	}

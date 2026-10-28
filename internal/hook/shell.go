@@ -670,6 +670,8 @@ type command struct {
 	heredocs    []*heredoc
 	herestrings []token
 	outFiles    []string // > / >> targets
+	redirs      []token  // every redirect target
+	next        *command // the command this one pipes into
 	pipeIn      bool
 	pipeOut     bool
 	subs        []*lexed // every substitution in the command, any position
@@ -699,6 +701,9 @@ func parse(lx *lexed) ([]*command, error) {
 			target := toks[i+1]
 			i++
 			cur.subs = append(cur.subs, target.subs...)
+			if t.text != "<<" && t.text != "<<-" && t.text != "<<<" {
+				cur.redirs = append(cur.redirs, target)
+			}
 			switch t.text {
 			case "<<", "<<-":
 				if t.doc != nil {
@@ -716,5 +721,10 @@ func parse(lx *lexed) ([]*command, error) {
 		}
 	}
 	flush(false)
+	for i := 0; i+1 < len(cmds); i++ {
+		if cmds[i].pipeOut {
+			cmds[i].next = cmds[i+1]
+		}
+	}
 	return cmds, nil
 }

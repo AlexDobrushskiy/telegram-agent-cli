@@ -64,7 +64,9 @@ type Options struct {
 	// WatcherEnvs are the watcher session variable names (config watcher_session_env);
 	// the default name is always included.
 	WatcherEnvs []string
-	Deadline    time.Duration // Run's time budget (DefaultDeadline if zero)
+	// XDGConfigHome is $XDG_CONFIG_HOME ("" = ~/.config).
+	XDGConfigHome string
+	Deadline      time.Duration // Run's time budget (DefaultDeadline if zero)
 }
 
 // DefaultOptions protects $TGAC_HOME (if set) and the default data dir.
@@ -81,6 +83,7 @@ func DefaultOptions() Options {
 		}
 	}
 	o.WatcherEnvs = WatcherEnvsFor(o.DataDirs)
+	o.XDGConfigHome = os.Getenv("XDG_CONFIG_HOME")
 	return o
 }
 
@@ -187,12 +190,18 @@ func dirPatterns(o Options) []*regexp.Regexp {
 
 // CheckFile returns why a file tool call needs the owner's OK ("" = allow).
 func CheckFile(tool, p string, o Options) string {
+	if p == "" && tool == "Grep" {
+		p = "." // Grep without a path searches the cwd
+	}
 	if p == "" {
 		return ""
 	}
 	full := resolvePath(p, o)
 	for _, d := range o.DataDirs {
 		dir := resolvePath(d, o)
+		if tool == "Grep" && within(dir, full) && dir != full {
+			return "searches " + full + ", which contains the " + BinaryName + " data dir (account secrets)"
+		}
 		if !within(full, dir) {
 			continue
 		}
@@ -216,7 +225,7 @@ func within(p, dir string) bool {
 	if runtime.GOOS == "darwin" {
 		p, dir = strings.ToLower(p), strings.ToLower(dir)
 	}
-	return p == dir || strings.HasPrefix(p, dir+string(filepath.Separator))
+	return p == dir || strings.HasPrefix(p, strings.TrimSuffix(dir, string(filepath.Separator))+string(filepath.Separator))
 }
 
 // absPath expands ~ and makes p absolute against the call's cwd.
