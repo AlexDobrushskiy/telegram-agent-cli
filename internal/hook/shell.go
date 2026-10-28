@@ -672,6 +672,7 @@ type command struct {
 	outFiles    []string // > / >> targets
 	redirs      []token  // every redirect target
 	next        *command // the command this one pipes into
+	prev        *command // the command piping into this one
 	pipeIn      bool
 	pipeOut     bool
 	subs        []*lexed // every substitution in the command, any position
@@ -723,7 +724,7 @@ func parse(lx *lexed) ([]*command, error) {
 	flush(false)
 	for i := 0; i+1 < len(cmds); i++ {
 		if cmds[i].pipeOut {
-			cmds[i].next = cmds[i+1]
+			cmds[i].next, cmds[i+1].prev = cmds[i+1], cmds[i]
 		}
 	}
 	return cmds, nil

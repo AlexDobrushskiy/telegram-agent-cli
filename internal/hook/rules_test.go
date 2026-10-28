@@ -231,7 +231,7 @@ func TestCheckBashAsks(t *testing.T) {
 		"ssh box <<'EOF'\ntelegram-agent-cli send text\nEOF":              "send text",
 		"bash <<'EOF'\ntelegram-agent-cli send text\nEOF":                 "send text",
 		`bash <<< "telegram-agent-cli send text"`:                         "send text",
-		`echo "telegram-agent-cli send text" | bash`:                      "pipes a script",
+		`echo "telegram-agent-cli send text" | bash`:                      "send text",
 		"su -c 'telegram-agent-cli send text' bob":                        "send text",
 		"find . -name x -exec telegram-agent-cli send file --path {} \\;": "send file",
 		// operators and substitutions
@@ -267,7 +267,7 @@ func TestCheckBashAsks(t *testing.T) {
 		"source scripts/bad.sh":                        "send text",
 		". scripts/bad.sh":                             "send text",
 		"cat > /tmp/r.sh <<'EOF'\ntelegram-agent-cli send text\nEOF\nbash /tmp/r.sh": "send text",
-		"cat <<'EOF' | bash\ntelegram-agent-cli send text\nEOF":                      "pipes a script",
+		"cat <<'EOF' | bash\ntelegram-agent-cli send text\nEOF":                      "send text",
 		// unparseable
 		`telegram-agent-cli me "unterminated`: "could not parse",
 	}

@@ -58,7 +58,8 @@ var noCommand = set("for", "select", "case", "function", "in")
 
 var shells = set("sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish")
 
-var interpreters = set("node", "ruby", "perl", "php", "bun", "deno", "Rscript", "tclsh", "lua")
+var interpreters = set("node", "ruby", "perl", "php", "bun", "deno", "Rscript", "tclsh", "lua", "osascript",
+	"awk", "gawk", "mawk", "nawk")
 
 var pythonRe = regexp.MustCompile(`^python[0-9.]*$`)
 
@@ -420,7 +421,7 @@ func (s *scanner) argv(words []token, cmd *command, c ctx) {
 	case name == "go":
 		s.goRun(args, c)
 	case pythonRe.MatchString(name) || interpreters[name]:
-		s.interpreter(args, c)
+		s.interpreter(name, args, cmd, c)
 	case strings.Contains(prog.text, "/"):
 		s.file(prog.text, modeAuto, c)
 	}
@@ -458,23 +459,62 @@ func (s *scanner) shell(args []token, cmd *command, c ctx) {
 		}
 		return
 	}
-	s.stdinScript(cmd, c)
+	s.stdinCode(cmd, c, true)
 }
 
-// stdinScript analyses what a shell reads on stdin: heredocs, herestrings or a pipe.
-func (s *scanner) stdinScript(cmd *command, c ctx) {
-	if cmd == nil {
+// pipedIn analyses what a command reads from the pipe: the literal text of
+// echo/printf, the files or heredoc of cat. Anything else is unseen: ask.
+func (s *scanner) pipedIn(cmd *command, c ctx, run func(string)) {
+	p := cmd.prev
+	if p == nil {
 		return
 	}
-	for _, h := range cmd.heredocs {
-		s.str(h.body, c)
+	idx, _ := skipPrefix(p.words)
+	if idx >= 0 && len(p.subs) == 0 {
+		args := p.words[idx+1:]
+		literal := true
+		for _, a := range args {
+			literal = literal && !a.dynamic
+		}
+		switch base(p.words[idx].text) {
+		case "echo", "printf":
+			if literal {
+				for len(args) > 0 && strings.HasPrefix(args[0].text, "-") {
+					args = args[1:]
+				}
+				run(joinWords(args))
+				return
+			}
+		case "cat":
+			if len(p.heredocs) > 0 || len(p.herestrings) > 0 {
+				for _, h := range p.heredocs {
+					run(h.body)
+				}
+				for _, h := range p.herestrings {
+					run(h.text)
+				}
+				return
+			}
+			if literal && len(args) > 0 {
+				for _, a := range args {
+					if b, err := s.o.ReadFile(s.abs(a.text)); err == nil {
+						run(string(b))
+					} else if !errorsIsNotExist(err) {
+						s.reasons.add("runs piped code the guard can't read")
+					}
+				}
+				return
+			}
+		}
 	}
-	for _, hs := range cmd.herestrings {
-		s.str(hs.text, c)
+	s.reasons.add("runs code from a pipe the guard can't see (" + pipeSource(p) + ")")
+}
+
+func pipeSource(p *command) string {
+	if idx, _ := skipPrefix(p.words); idx >= 0 {
+		return base(p.words[idx].text) + " | …"
 	}
-	if len(cmd.heredocs) == 0 && len(cmd.herestrings) == 0 && cmd.pipeIn {
-		s.condAdd(c, "pipes a script into a shell")
-	}
+	return "a pipe"
 }
 
 func (s *scanner) ssh(args []token, cmd *command, c ctx) {
@@ -489,7 +529,7 @@ func (s *scanner) ssh(args []token, cmd *command, c ctx) {
 		if rest := args[i+1:]; len(rest) > 0 {
 			s.str(joinWords(rest), c)
 		} else {
-			s.stdinScript(cmd, c)
+			s.stdinCode(cmd, c, true)
 		}
 		return
 	}
@@ -519,26 +559,6 @@ func (s *scanner) goRun(args []token, c ctx) {
 		for ; j < len(args) && strings.HasSuffix(args[j].text, ".go"); j++ {
 			s.file(args[j].text, modeText, c)
 		}
-		return
-	}
-}
-
-func (s *scanner) interpreter(args []token, c ctx) {
-	for i := 0; i < len(args); i++ {
-		t := args[i].text
-		switch t {
-		case "-c", "-e", "--eval", "-m", "-p", "--print":
-			return // inline code: the text rules see it
-		case "-W", "-X", "-r", "--require", "-I":
-			i++
-			continue
-		case "run":
-			continue // deno run / bun run
-		}
-		if strings.HasPrefix(t, "-") {
-			continue
-		}
-		s.file(t, modeText, c)
 		return
 	}
 }
@@ -582,6 +602,8 @@ func (s *scanner) file(p string, mode fileMode, c ctx) {
 		} else {
 			s.script(lx, fc)
 		}
+	} else {
+		s.code(content, c)
 	}
 	s.rawRules(content)
 }
