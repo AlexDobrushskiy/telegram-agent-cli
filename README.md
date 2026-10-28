@@ -242,15 +242,16 @@ Four layers, each independent:
    - changes Claude Code settings: `settings.json`/`settings.local.json` in any `.claude` dir or
      `$CLAUDE_CONFIG_DIR`, and `managed-settings.json`. File tools ask when the text they write or
      replace names `hooks`, `PreToolUse`, `disableAllHooks`, a `TGAC_` variable or the binary, or when
-     the `hooks`/`env` part of the file would change; Bash asks for redirects, `mv`, `cp`/`ln` onto it,
-     `sed -i`, `rm` and unknown programs pointed at a settings file or a `.claude` dir (`cat`, `jq`,
-     `grep`, `git diff` and other readers pass);
+     the `hooks`/`env` part of the file would change. Bash asks only when a settings file is the
+     target of a write: a redirect, `tee`, `mv`/`rm` (also of a `.claude` dir), the destination of
+     `cp`/`ln`/`rsync`, `sed -i`/`perl -i`, `dd of=`, `git checkout`/`restore`. Reading or
+     mentioning it passes, and code asks only when it names a settings file and also writes a file;
    - mixes an MTProto library (Telethon, gotd, Pyrogram…) with a session file;
    - uses Read on `config.json`, `session.json`, `peers.json` or `pending-login.json` in the data dir,
      Grep on the data dir or on a directory that contains it (`~`, `~/.config`, `/`, or no path while
      the cwd is one of those), or Edit/Write/MultiEdit/NotebookEdit anywhere under it;
    - writes code (any string field of Write/Edit/MultiEdit/NotebookEdit, not the replaced text) that
-     overrides `TGAC_READONLY`, sets the watcher variable, touches the data dir or Claude Code
+     overrides `TGAC_READONLY`, sets the watcher variable, touches the data dir, writes Claude Code
      settings, or pairs an MTProto library with a session. Documentation files (`.md`, `.txt`,
      `.rst`…) are not scanned, so `go test` or `make` can't run unchecked code that was written
      silently.
