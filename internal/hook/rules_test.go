@@ -109,6 +109,19 @@ func TestCheckBashAllows(t *testing.T) {
 		"cat > README.md <<'EOF'\ntelegram-agent-cli send text --chat 1\nTGAC_READONLY=0 telegram-agent-cli send\nEOF",
 		"cat > README.md <<EOF\ntelegram-agent-cli send text --chat 1\nEOF",
 		"# telegram-agent-cli send text\nls",
+		// message text and search patterns are data
+		`git commit -m "docs: TGAC_HOME, TGAC_READONLY=0 and ~/.config/telegram-agent-cli"`,
+		`git commit --message="mentions gotd and session.json"`,
+		`gh pr create --title "TGAC_READONLY=0 docs" --body "see ~/.config/telegram-agent-cli/session.json"`,
+		`grep -rn "TGAC_READONLY=0" docs/`,
+		`rg -g '*.md' -e "~/.config/telegram-agent-cli" .`,
+		`git -C repo grep "TGAC_READONLY=false"`,
+		`grep -- "TGAC_READONLY=0" README.md`,
+		// a mention of TGAC_HOME, and longer names next to the data dir
+		"grep -r TGAC_HOME .",
+		"echo see TGAC_HOME in the docs",
+		"cat ~/.config/telegram-agent-cli-notes.md",
+		"ls /xhome/u/.config/telegram-agent-cli.old",
 		// unrelated
 		"ls ~/.config",
 		"grep -r TGAC_READONLY .",

@@ -49,10 +49,11 @@ var (
 	// TGAC_READONLY=v as a shell assignment, and "TGAC_READONLY" = v / : v / , v in code.
 	shellOverrideRe = regexp.MustCompile(`TGAC_READONLY=("[^"]*"|'[^']*'|[^\s;&|)'"]*)`)
 	codeOverrideRe  = regexp.MustCompile(`TGAC_READONLY(?:["'\])]+\s*|\s+)(?:=|:|,)\s*["']?([^\s"';&|)\]}]*)|TGAC_READONLY\s*[:,]\s*["']?([^\s"';&|)\]}]*)`)
-	homeVarRe       = regexp.MustCompile(`\bTGAC_HOME\b`)
-	rawLibRe        = regexp.MustCompile(`(?i)\b(telethon|gotd|pyrogram|gramjs|mtproto)\b`)
-	rawSessRe       = regexp.MustCompile(`(?i)session\.json|\.session\b|StringSession|TelegramClient|FileStorage|auth_key`)
-	mentionRe       = regexp.MustCompile(`(?i)` + regexp.QuoteMeta(BinaryName))
+	// an assignment or expansion of TGAC_HOME, in shell or code; a bare mention is fine
+	homeVarRe = regexp.MustCompile(`TGAC_HOME\+?=|\$\{?TGAC_HOME\b|TGAC_HOME["'\])]+\s*(?:=|:|,)|\b(?i:environ|getenv|printenv|env)\W{0,3}TGAC_HOME\b`)
+	rawLibRe  = regexp.MustCompile(`(?i)\b(telethon|gotd|pyrogram|gramjs|mtproto)\b`)
+	rawSessRe = regexp.MustCompile(`(?i)session\.json|\.session\b|StringSession|TelegramClient|FileStorage|auth_key`)
+	mentionRe = regexp.MustCompile(`(?i)` + regexp.QuoteMeta(BinaryName))
 )
 
 // Options configures a check. Zero values fall back to the real environment.
@@ -134,7 +135,7 @@ func (s *scanner) rawRules(text string) {
 		}
 	}
 	if homeVarRe.MatchString(text) {
-		s.reasons.add("references " + config.EnvHome)
+		s.reasons.add("sets or reads " + config.EnvHome)
 	}
 	for _, re := range s.dirRes {
 		if re.MatchString(text) {
@@ -147,8 +148,8 @@ func (s *scanner) rawRules(text string) {
 	}
 }
 
-// dirPatterns matches the data dirs in absolute, ~ and $HOME forms, plus the
-// default location in any form.
+// dirPatterns matches the data dirs in absolute, ~, $HOME and ${HOME} forms, plus
+// the default location in any form. A longer name (telegram-agent-cli-notes) is not the dir.
 func dirPatterns(o Options) []*regexp.Regexp {
 	forms := []string{"/.config/" + BinaryName, "XDG_CONFIG_HOME}/" + BinaryName, "XDG_CONFIG_HOME/" + BinaryName}
 	for _, d := range o.DataDirs {
@@ -163,16 +164,17 @@ func dirPatterns(o Options) []*regexp.Regexp {
 			}
 		}
 	}
+	const right = `(?:$|[^A-Za-z0-9_.-])`
 	var res []*regexp.Regexp
 	for _, f := range forms {
-		bound := `(?:^|[^A-Za-z0-9_-])`
+		left := `(?:^|[^A-Za-z0-9_-])`
 		if strings.HasPrefix(f, "/") {
-			bound = ""
+			left = ""
 		}
-		res = append(res, regexp.MustCompile(`(?i)`+bound+regexp.QuoteMeta(f)))
+		res = append(res, regexp.MustCompile(`(?i)`+left+regexp.QuoteMeta(f)+right))
 	}
 	// relative ".config/<name>" at a word start
-	res = append(res, regexp.MustCompile(`(?i)(?:^|[\s"'=:(])\.config/`+regexp.QuoteMeta(BinaryName)))
+	res = append(res, regexp.MustCompile(`(?i)(?:^|[\s"'=:(])\.config/`+regexp.QuoteMeta(BinaryName)+right))
 	return res
 }
 

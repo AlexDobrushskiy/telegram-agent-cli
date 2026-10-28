@@ -25,6 +25,8 @@ type token struct {
 	glob    bool     // unquoted glob or brace chars
 	subs    []*lexed // command/process substitutions inside the word
 	doc     *heredoc // for << and <<-: the attached body
+	start   int      // absolute offsets of a word, -1 if not verbatim
+	end     int
 }
 
 type heredoc struct {
@@ -236,7 +238,7 @@ func (l *lexer) readHeredocs() {
 // word lexes one shell word starting at l.i.
 func (l *lexer) word() (token, error) {
 	var b strings.Builder
-	tok := token{kind: tWord}
+	tok := token{kind: tWord, start: l.abs(l.i)}
 	braces := false
 	for l.i < len(l.src) {
 		c := l.src[l.i]
@@ -308,6 +310,7 @@ func (l *lexer) word() (token, error) {
 		}
 	}
 	tok.text = b.String()
+	tok.end = l.abs(l.i)
 	return tok, nil
 }
 

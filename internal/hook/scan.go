@@ -203,7 +203,87 @@ func (s *scanner) command(cmd *command, c ctx) {
 			}
 		}
 	}
+	s.markData(cmd.words, idx)
 	s.argv(cmd.words, cmd, c)
+}
+
+// dataFlags carry message text (commit messages, PR titles and bodies), not code.
+var dataFlags = set("-m", "--message", "--body", "--title")
+
+var greps = set("grep", "egrep", "fgrep", "rg", "ag", "ack")
+
+var grepValues = set("-A", "-B", "-C", "-m", "-f", "-g", "-t", "-T", "-d", "-D", "--type", "--glob",
+	"--max-count", "--include", "--exclude", "--context", "--file")
+
+// markData excludes message-text flag values and search patterns from the text
+// rules. Words with expansions or substitutions stay checked.
+func (s *scanner) markData(words []token, idx int) {
+	if idx < 0 {
+		return
+	}
+	mark := func(w token) {
+		if w.start >= 0 && !w.dynamic {
+			s.inert = append(s.inert, [2]int{w.start, w.end})
+		}
+	}
+	args := words[idx+1:]
+	for i, w := range args {
+		if dataFlags[w.text] && i+1 < len(args) {
+			mark(args[i+1])
+		}
+		if k, _, ok := strings.Cut(w.text, "="); ok && strings.HasPrefix(k, "--") && dataFlags[k] {
+			mark(w)
+		}
+	}
+	prog := base(words[idx].text)
+	if prog == "git" {
+		for i := 0; i < len(args); i++ {
+			t := args[i].text
+			if t == "-C" || t == "-c" {
+				i++
+				continue
+			}
+			if !strings.HasPrefix(t, "-") {
+				if t == "grep" {
+					prog, args = "grep", args[i+1:]
+				}
+				break
+			}
+		}
+	}
+	if !greps[prog] {
+		return
+	}
+	explicit := false
+	for i, w := range args {
+		if (w.text == "-e" || w.text == "--regexp") && i+1 < len(args) {
+			mark(args[i+1])
+			explicit = true
+		} else if strings.HasPrefix(w.text, "--regexp=") {
+			mark(w)
+			explicit = true
+		}
+	}
+	if explicit {
+		return
+	}
+	for i := 0; i < len(args); i++ {
+		t := args[i].text
+		if t == "--" {
+			if i+1 < len(args) {
+				mark(args[i+1])
+			}
+			return
+		}
+		if strings.HasPrefix(t, "-") {
+			if grepValues[t] {
+				i++
+			}
+			continue
+		}
+		mark(args[i])
+		return
+	}
 }
 
 // skipPrefix returns the index of the program word (-1 if none) and any
