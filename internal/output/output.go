@@ -125,5 +125,8 @@ func Success(w io.Writer, data any) error {
 func Failure(w io.Writer, err error) int {
 	e := As(err)
 	_ = write(w, envelope{SchemaVersion: SchemaVersion, OK: false, Error: e})
+	if e.Exit == ExitOK {
+		return ExitInternal // an error envelope never exits 0
+	}
 	return e.Exit
 }

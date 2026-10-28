@@ -61,3 +61,12 @@ func TestFailureEnvelopeAndExitCodes(t *testing.T) {
 		}
 	}
 }
+
+func TestErrorEnvelopeNeverExitsZero(t *testing.T) {
+	for _, err := range []error{&Error{Code: "custom", Message: "no exit set"}, Usage("x"), errors.New("plain")} {
+		var b bytes.Buffer
+		if exit := Failure(&b, err); exit == 0 {
+			t.Errorf("%v: error envelope exited 0", err)
+		}
+	}
+}
