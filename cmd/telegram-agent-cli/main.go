@@ -12,7 +12,12 @@ import (
 )
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := context.Background(), func() {}
+	// In hook mode the default signal handling stays, so a timeout kill ends the process.
+	hookMode := len(os.Args) > 2 && os.Args[1] == "hook" && os.Args[2] == "claude-pretooluse"
+	if !hookMode {
+		ctx, stop = signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	}
 	app, err := cli.New()
 	if err != nil {
 		os.Exit(output.Failure(os.Stdout, err))

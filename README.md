@@ -332,7 +332,10 @@ Environment:
 `hook install` edits `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`, or
 `--settings PATH`): it sets `env.TGAC_READONLY` to `"1"` and adds two `PreToolUse` entries, matcher
 `Bash|Monitor` and matcher `Read|Edit|Write|MultiEdit|NotebookEdit|Grep`, each running
-`<absolute path of this binary> hook claude-pretooluse`. It keeps every other key, keeps their order,
+`<absolute path of this binary> hook claude-pretooluse` with `"timeout": 10` and `"onFailure": "block"`
+(fail closed: if the hook cannot start, crashes or times out, the tool call is blocked; `onFailure`
+needs Claude Code 2.1.295 or later, older versions ignore it and let the call through). The hook
+itself gives up after 3 seconds and asks instead of waiting. It keeps every other key, keeps their order,
 appends to an existing entry with the same matcher instead of adding a second one, moves the guard
 out of entries with an older matcher (such as plain `Bash`), updates the path if the binary moved, writes atomically, and saves the previous file as `settings.json.bak-YYYYMMDD-HHMMSS`.
 Running it again changes nothing. `--dry-run` prints the diff and the resulting settings. Use

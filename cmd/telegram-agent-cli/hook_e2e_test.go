@@ -8,7 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // TestHookEndToEnd builds the binary, installs the hook into a temp settings
@@ -112,6 +114,28 @@ func TestHookEndToEnd(t *testing.T) {
 			t.Errorf("%s: output %q, want none", c.payload, out)
 		}
 	}
+
+	// SIGTERM (a hook timeout) ends a hook that is still waiting for input.
+	c := exec.Command(bin, "hook", "claude-pretooluse")
+	c.Env = env
+	stdin, err := c.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	_ = c.Process.Signal(syscall.SIGTERM)
+	exited := make(chan error, 1)
+	go func() { exited <- c.Wait() }()
+	select {
+	case <-exited:
+	case <-time.After(3 * time.Second):
+		_ = c.Process.Kill()
+		t.Error("hook ignored SIGTERM")
+	}
+	_ = stdin.Close()
 
 	env = append(append([]string{}, base...), "TGAC_READONLY=0")
 	if out, code := run("", bin, "hook", "uninstall"); code != 0 || !strings.Contains(out, `"changed":true`) {

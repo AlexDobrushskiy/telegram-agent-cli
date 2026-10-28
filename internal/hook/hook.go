@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"strings"
+	"time"
 )
 
 // Input is the part of the Claude Code PreToolUse payload the guard reads.
@@ -82,30 +83,25 @@ func mentionsAccount(ti map[string]any, o Options) bool {
 
 const maxInput = 16 << 20
 
+// DefaultDeadline bounds one check; past it the hook asks instead of waiting.
+const DefaultDeadline = 3 * time.Second
+
 // Run reads one PreToolUse payload from r and writes an "ask" decision to w when
-// the call needs the owner's OK. Bad input produces no output.
-func Run(r io.Reader, w io.Writer, o Options) (err error) {
-	raw, err := io.ReadAll(io.LimitReader(r, maxInput))
-	if err != nil {
-		return nil
+// the call needs the owner's OK, or when the check does not finish within the
+// deadline. Bad input produces no output.
+func Run(r io.Reader, w io.Writer, o Options) error {
+	deadline := o.Deadline
+	if deadline <= 0 {
+		deadline = DefaultDeadline
 	}
+	done := make(chan string, 1)
+	go func() { done <- evaluateRaw(r, o) }()
 	var reason string
-	func() {
-		defer func() {
-			// A guard bug must not crash the hook; ask only if the call looks related.
-			if recover() != nil {
-				low := strings.ToLower(string(raw))
-				if strings.Contains(low, BinaryName) || strings.Contains(low, "tgac_") {
-					reason = "Telegram account action: the guard could not check this call; needs the account owner's explicit OK"
-				}
-			}
-		}()
-		var in Input
-		if json.Unmarshal(raw, &in) != nil {
-			return
-		}
-		reason = Evaluate(in, o)
-	}()
+	select {
+	case reason = <-done:
+	case <-time.After(deadline):
+		reason = "Telegram account action: the guard did not finish checking this call in time; needs the account owner's explicit OK"
+	}
 	if reason == "" {
 		return nil
 	}
@@ -116,4 +112,26 @@ func Run(r io.Reader, w io.Writer, o Options) (err error) {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	return enc.Encode(d)
+}
+
+// evaluateRaw reads and checks one payload; bad input gives "".
+func evaluateRaw(r io.Reader, o Options) (reason string) {
+	raw, err := io.ReadAll(io.LimitReader(r, maxInput))
+	if err != nil {
+		return ""
+	}
+	defer func() {
+		// A guard bug must not crash the hook; ask only if the call looks related.
+		if recover() != nil {
+			low := strings.ToLower(string(raw))
+			if strings.Contains(low, BinaryName) || strings.Contains(low, "tgac_") {
+				reason = "Telegram account action: the guard could not check this call; needs the account owner's explicit OK"
+			}
+		}
+	}()
+	var in Input
+	if json.Unmarshal(raw, &in) != nil {
+		return ""
+	}
+	return Evaluate(in, o)
 }

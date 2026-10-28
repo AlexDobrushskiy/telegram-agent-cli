@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 const testHome = "/xhome/u"
@@ -412,5 +414,58 @@ func TestRun(t *testing.T) {
 		if out := run(t, p); out != "" {
 			t.Errorf("Run(%.60q) = %q, want silence", p, out)
 		}
+	}
+}
+
+func TestRunDeadline(t *testing.T) {
+	o := testOptions()
+	o.Deadline = 100 * time.Millisecond
+	block := make(chan struct{})
+	defer close(block)
+	o.ReadFile = func(string) ([]byte, error) { <-block; return nil, errors.New("unreachable") }
+	var out bytes.Buffer
+	start := time.Now()
+	if err := Run(strings.NewReader(`{"tool_name":"Bash","tool_input":{"command":"bash scripts/slow.sh"}}`), &out, o); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) > 2*time.Second || !strings.Contains(out.String(), `"permissionDecision":"ask"`) ||
+		!strings.Contains(out.String(), "in time") {
+		t.Errorf("after %v: %q", time.Since(start), out.String())
+	}
+}
+
+func TestReadScriptOnlyRegularFiles(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "fifo.sh")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(dir, "real.sh")
+	if err := os.WriteFile(real, []byte("telegram-agent-cli send text --chat 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.sh")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	o := Options{UserHome: "/xhome/u", Cwd: dir}
+	done := make(chan []string, 1)
+	go func() { done <- CheckBash("bash fifo.sh", o) }()
+	select {
+	case r := <-done:
+		if len(r) != 0 {
+			t.Errorf("fifo: %v", r)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reading a FIFO script blocked")
+	}
+	if _, err := readScript(fifo); err == nil {
+		t.Error("readScript opened a FIFO")
+	}
+	if r := CheckBash("bash link.sh", o); !strings.Contains(strings.Join(r, ";"), "send text") {
+		t.Errorf("symlinked script: %v", r)
+	}
+	if _, err := readScript("/dev/zero"); err == nil {
+		t.Error("readScript opened a device")
 	}
 }

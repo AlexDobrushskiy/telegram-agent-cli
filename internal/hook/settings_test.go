@@ -39,7 +39,9 @@ const freshInstall = `{
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/tools/bin/telegram-agent-cli hook claude-pretooluse"
+            "command": "/opt/tools/bin/telegram-agent-cli hook claude-pretooluse",
+            "timeout": 10,
+            "onFailure": "block"
           }
         ]
       },
@@ -48,7 +50,9 @@ const freshInstall = `{
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/tools/bin/telegram-agent-cli hook claude-pretooluse"
+            "command": "/opt/tools/bin/telegram-agent-cli hook claude-pretooluse",
+            "timeout": 10,
+            "onFailure": "block"
           }
         ]
       }
@@ -168,7 +172,9 @@ func TestInstallPreserves(t *testing.T) {
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "/opt/tools/bin/telegram-agent-cli hook claude-pretooluse"
+                        "command": "/opt/tools/bin/telegram-agent-cli hook claude-pretooluse",
+                        "timeout": 10,
+                        "onFailure": "block"
                     }
                 ]
             },
@@ -177,7 +183,9 @@ func TestInstallPreserves(t *testing.T) {
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "/opt/tools/bin/telegram-agent-cli hook claude-pretooluse"
+                        "command": "/opt/tools/bin/telegram-agent-cli hook claude-pretooluse",
+                        "timeout": 10,
+                        "onFailure": "block"
                     }
                 ]
             }
@@ -294,6 +302,23 @@ func TestInstallUpdatesAndDedupes(t *testing.T) {
 	}
 	if r, _ := Install(p, newBin, false, now); r.Changed {
 		t.Errorf("not idempotent: %v", r.Actions)
+	}
+}
+
+func TestInstallAddsTimeoutAndOnFailure(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "settings.json")
+	cmd := bin + " hook claude-pretooluse"
+	write(t, p, `{"hooks": {"PreToolUse": [
+	  {"matcher": "Bash|Monitor", "hooks": [{"type": "command", "command": "`+cmd+`"}]},
+	  {"matcher": "Read|Edit|Write|MultiEdit|NotebookEdit|Grep", "hooks": [{"type": "command", "command": "`+cmd+`", "timeout": 600, "onFailure": "continue"}]}
+	]}, "env": {"TGAC_READONLY": "1"}}`)
+	r, err := Install(p, bin, false, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := read(t, p)
+	if len(r.Actions) != 2 || strings.Count(got, `"timeout": 10`) != 2 || strings.Count(got, `"onFailure": "block"`) != 2 {
+		t.Errorf("actions %v\n%s", r.Actions, got)
 	}
 }
 

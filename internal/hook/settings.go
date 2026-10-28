@@ -223,9 +223,8 @@ func Install(path, binary string, dryRun bool, now time.Time) (*Result, error) {
 				actions = append(actions, fmt.Sprintf("removed a duplicate guard from matcher %q", matcher))
 				continue
 			}
-			if ho := h.(*object); ho.str("command") != want {
-				ho.set("command", want)
-				actions = append(actions, fmt.Sprintf("updated the guard command for matcher %q", matcher))
+			if setGuardFields(h.(*object), want) {
+				actions = append(actions, fmt.Sprintf("updated the guard entry for matcher %q", matcher))
 			}
 			out = append(out, h)
 		}
@@ -241,7 +240,8 @@ func Install(path, binary string, dryRun bool, now time.Time) (*Result, error) {
 		if hasGuard(kept, m) {
 			continue
 		}
-		hook := &object{members: []member{{"type", "command"}, {"command", want}}}
+		hook := &object{members: []member{{"type", "command"}}}
+		setGuardFields(hook, want)
 		if e := findEntry(kept, m); e != nil {
 			hs, _ := entryHooks(e)
 			e.set("hooks", append(hs, hook))
@@ -319,6 +319,28 @@ func Uninstall(path string, dryRun bool, now time.Time) (*Result, error) {
 		}
 	}
 	return f.finish(path, actions, dryRun, now)
+}
+
+// HookTimeout is the per-call limit written on the guard entries (seconds).
+const HookTimeout = 10
+
+// setGuardFields sets the guard's command, timeout and fail-closed onFailure;
+// it reports whether anything changed.
+func setGuardFields(h *object, command string) bool {
+	changed := false
+	if h.str("command") != command {
+		h.set("command", command)
+		changed = true
+	}
+	if v, ok := h.get("timeout"); !ok || fmt.Sprint(v) != fmt.Sprint(HookTimeout) {
+		h.set("timeout", json.Number(fmt.Sprint(HookTimeout)))
+		changed = true
+	}
+	if h.str("onFailure") != "block" {
+		h.set("onFailure", "block")
+		changed = true
+	}
+	return changed
 }
 
 func contains(xs []any, pred func(any) bool) bool {

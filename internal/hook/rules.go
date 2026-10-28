@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/AlexDobrushskiy/telegram-agent-cli/internal/config"
 )
@@ -62,6 +64,7 @@ type Options struct {
 	UserHome string                            // for ~ and $HOME forms
 	Cwd      string                            // base for relative paths
 	ReadFile func(path string) ([]byte, error) // script files named in a command
+	Deadline time.Duration                     // Run's time budget (DefaultDeadline if zero)
 }
 
 // DefaultOptions protects $TGAC_HOME (if set) and the default data dir.
@@ -82,14 +85,29 @@ func DefaultOptions() Options {
 
 const maxScriptSize = 1 << 20
 
+// readScript reads a script a command runs. Only regular files are opened
+// (non-blocking), so a FIFO or device named as a script cannot stall the hook.
 func readScript(p string) ([]byte, error) {
-	f, err := os.Open(p)
+	st, err := os.Lstat(p)
+	if err == nil && st.Mode()&os.ModeSymlink != 0 {
+		var real string
+		if real, err = filepath.EvalSymlinks(p); err == nil {
+			p = real
+			st, err = os.Lstat(p)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() || st.Size() > maxScriptSize {
+		return nil, fmt.Errorf("not a script: %s", p)
+	}
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() || st.Size() > maxScriptSize {
+	if st, err = f.Stat(); err != nil || !st.Mode().IsRegular() {
 		return nil, fmt.Errorf("not a script: %s", p)
 	}
 	return io.ReadAll(io.LimitReader(f, maxScriptSize))
