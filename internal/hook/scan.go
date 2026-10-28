@@ -41,20 +41,35 @@ var wrappers = map[string]wrapper{
 	"stdbuf":     {values: set("-i", "-o", "-e")},
 	"xargs": {values: set("-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a",
 		"--max-args", "--max-procs", "--delimiter", "--arg-file", "--max-lines")},
-	"watch":  {values: set("-n", "--interval")},
-	"flock":  {values: set("-w", "-E", "--timeout", "--conflict-exit-code"), positional: 1, cmdFlag: set("-c", "--command")},
-	"uv":     {values: uvValues},
-	"uvx":    {values: uvValues},
-	"run":    {values: uvValues},
-	"poetry": {},
-	"pipx":   {values: set("--spec", "--python")},
+	"flock":        {values: set("-w", "-E", "--timeout", "--conflict-exit-code"), positional: 1, cmdFlag: set("-c", "--command")},
+	"uv":           {values: uvValues},
+	"uvx":          {values: uvValues},
+	"run":          {values: uvValues},
+	"poetry":       {},
+	"pipx":         {values: set("--spec", "--python")},
+	"script":       {values: set("-t", "-F", "-T", "-I", "-O", "-B", "-E", "-m"), positional: 1, cmdFlag: set("-c", "--command")},
+	"busybox":      {},
+	"toybox":       {},
+	"chroot":       {values: set("--userspec", "--groups"), positional: 1},
+	"arch":         {},
+	"setsid":       {},
+	"taskset":      {positional: 1},
+	"unshare":      {},
+	"firejail":     {},
+	"sandbox-exec": {values: set("-f", "-p", "-n", "-D")},
+	"strace":       {values: set("-o", "-e", "-p", "-s", "-u", "-E")},
+	"ltrace":       {values: set("-o", "-e", "-p", "-s", "-u")},
+	"valgrind":     {},
+	"nsenter":      {values: set("-t", "--target")},
+	"entr":         {},
+	"gtimeout":     {values: set("-s", "-k", "--signal", "--kill-after"), positional: 1},
 }
 
 // keywords are shell words that can precede a command.
 var keywords = set("!", "{", "}", "if", "then", "else", "elif", "fi", "while", "until", "do", "done", "coproc", "esac")
 
 // noCommand words start a construct whose words are not a command.
-var noCommand = set("for", "select", "case", "function", "in")
+var noCommand = set("for", "select", "case", "in")
 
 var shells = set("sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish")
 
@@ -333,6 +348,10 @@ func skipPrefix(words []token) (int, []string) {
 			i++
 			continue
 		}
+		if t == "function" {
+			i += 2 // function NAME: the body follows
+			continue
+		}
 		if noCommand[t] {
 			return -1, nested
 		}
@@ -351,6 +370,9 @@ func skipPrefix(words []token) (int, []string) {
 				}
 				if w.cmdFlag[f] && i < len(words) {
 					return -1, append(nested, words[i].text)
+				}
+				if v, ok := gluedValue(f, w.cmdFlag); ok {
+					return -1, append(nested, v)
 				}
 				if w.values[f] {
 					i++
@@ -379,9 +401,18 @@ func (s *scanner) argv(words []token, cmd *command, c ctx) {
 		return
 	}
 	name := base(prog.text)
+	args = xargsArgs(words[:idx], args)
 	switch {
 	case strings.EqualFold(name, BinaryName):
 		s.reasons.add(checkInvocation(args))
+	case name == "parallel":
+		s.parallel(args, c)
+	case name == "watch":
+		s.watch(args, c)
+	case name == "hyperfine":
+		s.hyperfine(args, c)
+	case name == "tmux":
+		s.tmux(args, c)
 	case name == "alias":
 		for _, a := range args {
 			if mentionRe.MatchString(a.text) {
@@ -392,9 +423,14 @@ func (s *scanner) argv(words []token, cmd *command, c ctx) {
 		s.shell(args, cmd, c)
 	case name == "source" || name == ".":
 		if len(args) > 0 {
-			s.file(args[0].text, modeShell, c)
+			s.scriptArg(args[0], c)
 		}
 	case name == "eval":
+		for _, a := range args {
+			if len(a.subs) > 0 {
+				s.reasons.add(reasonBuilt)
+			}
+		}
 		s.str(joinWords(args), c)
 	case name == "ssh":
 		s.ssh(args, cmd, c)
@@ -453,9 +489,9 @@ func (s *scanner) shell(args []token, cmd *command, c ctx) {
 			continue
 		}
 		if cflag {
-			s.str(t, c)
+			s.cmdString(args[i], c)
 		} else {
-			s.file(t, modeShell, c)
+			s.scriptArg(args[i], c)
 		}
 		return
 	}
@@ -518,20 +554,35 @@ func pipeSource(p *command) string {
 }
 
 func (s *scanner) ssh(args []token, cmd *command, c ctx) {
+	host := false
 	for i := 0; i < len(args); i++ {
 		t := args[i].text
-		if strings.HasPrefix(t, "-") {
+		if t == "--" {
+			if !host {
+				continue
+			}
+			i++
+		} else if strings.HasPrefix(t, "-") {
 			if sshValues[t] {
 				i++
 			}
+			continue // options may also follow the host
+		} else if !host {
+			host = true
 			continue
 		}
-		if rest := args[i+1:]; len(rest) > 0 {
+		if rest := args[i:]; len(rest) > 0 {
+			for _, a := range rest {
+				if len(a.subs) > 0 {
+					s.reasons.add(reasonBuilt)
+				}
+			}
 			s.str(joinWords(rest), c)
-		} else {
-			s.stdinCode(cmd, c, true)
+			return
 		}
-		return
+	}
+	if host {
+		s.stdinCode(cmd, c, true)
 	}
 }
 
@@ -585,6 +636,9 @@ func (s *scanner) file(p string, mode fileMode, c ctx) {
 	if !ok {
 		b, err := s.o.ReadFile(full)
 		if err != nil {
+			if !errorsIsNotExist(err) {
+				s.reasons.add("runs " + base(full) + ", which the guard can't read (" + err.Error() + ")")
+			}
 			return
 		}
 		if bytes.IndexByte(b[:min(len(b), 8192)], 0) >= 0 {

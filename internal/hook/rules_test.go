@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -37,7 +38,7 @@ func testOptions() Options {
 			if s, ok := testFiles[p]; ok {
 				return []byte(s), nil
 			}
-			return nil, errors.New("no such file")
+			return nil, fs.ErrNotExist
 		},
 	}
 }
@@ -454,8 +455,8 @@ func TestReadScriptOnlyRegularFiles(t *testing.T) {
 	go func() { done <- CheckBash("bash fifo.sh", o) }()
 	select {
 	case r := <-done:
-		if len(r) != 0 {
-			t.Errorf("fifo: %v", r)
+		if !strings.Contains(strings.Join(r, ";"), "can't read") {
+			t.Errorf("fifo: %v, want an ask", r)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("reading a FIFO script blocked")
