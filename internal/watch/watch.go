@@ -10,16 +10,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/AlexDobrushskiy/telegram-agent-cli/internal/config"
 )
 
 // Scopes: which chats a watcher may answer.
 const (
-	ScopeListed   = "listed"   // chats in state.json
-	ScopeContacts = "contacts" // mutual contacts, or chats in state.json
+	ScopeListed   = "listed"   // chats in the registry entry
+	ScopeContacts = "contacts" // mutual contacts, or listed chats
 	ScopeDMFirst  = "dm-first" // 1:1 chats where the other side wrote first
 )
 
@@ -33,73 +36,106 @@ const (
 	DefaultBackoffMinutes = 15
 )
 
-// Watcher dir file names.
+// File names: PAUSE in the watcher's own dir or its data-dir dir; the send log in the data dir.
 const (
-	StateFile = "state.json"
 	PauseFile = "PAUSE"
-	LogFile   = "sends.log"
+	LogFile   = "sends.jsonl"
 )
 
 // RegistryHelp documents watchers.json for --help.
-const RegistryHelp = `Registry: watchers.json in the data dir, edited by the user (never by an agent):
-  {"NAME": {"dir": "/abs/path/to/watcher",   // required; "~/" is expanded
-            "scope": "listed",               // listed | contacts | dm-first (default listed)
-            "groups": false,                 // allow groups (they must also be listed in state.json)
-            "mentions_only": true,           // in groups, only answer messages that mention/reply to you
-            "max_chars": 300,                // reply length limit (characters)
-            "per_hour": 20,                  // this watcher's sends per hour
-            "per_chat_seconds": 20,          // min seconds between replies in one chat (any watcher)
-            "backoff_minutes": 15,           // stay quiet when you wrote in the chat this recently
+const RegistryHelp = `Registry: watchers.json in the data dir. Only the user edits it (the hook asks before
+an agent touches the data dir); everything a watcher is trusted with lives here:
+  {"NAME": {"session": "<caller session id>",  // required: $<watcher_session_env> must equal it
+            "chats": {"<chat id>": "note"},    // allowlist (listed scope; groups must be listed)
+            "scope": "listed",                 // listed | contacts | dm-first (default listed)
+            "groups": false,                   // allow listed groups
+            "mentions_only": true,             // in groups, only answer messages that mention/reply to you
+            "max_chars": 300,                  // reply length limit (characters)
+            "per_hour": 20,                    // this watcher's sends per hour
+            "per_chat_seconds": 20,            // min seconds between replies in one chat (any watcher)
+            "backoff_minutes": 15,             // stay quiet when you wrote in the chat this recently
+            "dir": "/abs/path",                // optional: the watcher's own workdir; a PAUSE file there pauses it
             "approved": "who approved it, when, for what"}}
-Watcher dir: state.json {"active_watcher": "<session id>", "chats": {"<chat id>": "note"}},
-  optional PAUSE file, sends.log (jsonl, written by watch reply).
-Data dir: PAUSE-ALL stops every watcher; answered.jsonl is the shared ledger of answered messages.
+NAME: letters, digits, '.', '_', '-' (max 64).
+Data dir: watchers/NAME/sends.jsonl logs every send attempt; watchers/NAME/PAUSE pauses one
+  watcher; PAUSE-ALL stops every watcher; answered.jsonl is the shared ledger of answered messages.
 Config: watcher_session_env names the env var holding the caller's session id
   (default TGAC_WATCHER_SESSION); global_per_hour caps sends across all watchers (default 30).`
 
+var validName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
 // entry is one raw registry record; pointers tell omitted from explicit values.
 type entry struct {
-	Dir            string `json:"dir"`
-	Scope          string `json:"scope"`
-	Groups         *bool  `json:"groups"`
-	MentionsOnly   *bool  `json:"mentions_only"`
-	MaxChars       *int   `json:"max_chars"`
-	PerHour        *int   `json:"per_hour"`
-	PerChatSeconds *int   `json:"per_chat_seconds"`
-	BackoffMinutes *int   `json:"backoff_minutes"`
-	Approved       string `json:"approved"`
+	Session        string                     `json:"session"`
+	Chats          map[string]json.RawMessage `json:"chats"`
+	Dir            string                     `json:"dir"`
+	Scope          string                     `json:"scope"`
+	Groups         *bool                      `json:"groups"`
+	MentionsOnly   *bool                      `json:"mentions_only"`
+	MaxChars       *int                       `json:"max_chars"`
+	PerHour        *int                       `json:"per_hour"`
+	PerChatSeconds *int                       `json:"per_chat_seconds"`
+	BackoffMinutes *int                       `json:"backoff_minutes"`
+	Approved       string                     `json:"approved"`
 }
 
-// Watcher is a registry entry with defaults applied.
+// Watcher is a registry entry with defaults applied. Session is never printed.
 type Watcher struct {
-	Name           string `json:"name"`
-	Dir            string `json:"dir"`
-	Scope          string `json:"scope"`
-	Groups         bool   `json:"groups"`
-	MentionsOnly   bool   `json:"mentions_only"`
-	MaxChars       int    `json:"max_chars"`
-	PerHour        int    `json:"per_hour"`
-	PerChatSeconds int    `json:"per_chat_seconds"`
-	BackoffMinutes int    `json:"backoff_minutes"`
-	Approved       string `json:"approved"`
+	Name           string           `json:"name"`
+	Session        string           `json:"-"`
+	Chats          map[int64]string `json:"-"`
+	Dir            string           `json:"dir,omitempty"`
+	Scope          string           `json:"scope"`
+	Groups         bool             `json:"groups"`
+	MentionsOnly   bool             `json:"mentions_only"`
+	MaxChars       int              `json:"max_chars"`
+	PerHour        int              `json:"per_hour"`
+	PerChatSeconds int              `json:"per_chat_seconds"`
+	BackoffMinutes int              `json:"backoff_minutes"`
+	Approved       string           `json:"approved"`
+
+	dataDir string // the watcher's dir inside the data dir
 }
 
-func (w *Watcher) StatePath() string { return filepath.Join(w.Dir, StateFile) }
-func (w *Watcher) PausePath() string { return filepath.Join(w.Dir, PauseFile) }
-func (w *Watcher) LogPath() string   { return filepath.Join(w.Dir, LogFile) }
+// DataDir is watchers/NAME in the data dir ("" for an invalid name).
+func (w *Watcher) DataDir() string { return w.dataDir }
+
+// LogPath is the send log in the data dir.
+func (w *Watcher) LogPath() string {
+	if w.dataDir == "" {
+		return ""
+	}
+	return filepath.Join(w.dataDir, LogFile)
+}
+
+// PausePaths are the PAUSE files that pause this watcher.
+func (w *Watcher) PausePaths() []string {
+	var out []string
+	if w.dataDir != "" {
+		out = append(out, filepath.Join(w.dataDir, PauseFile))
+	}
+	if w.Dir != "" {
+		out = append(out, filepath.Join(w.Dir, PauseFile))
+	}
+	return out
+}
+
+// Listed reports whether chat is on the allowlist.
+func (w *Watcher) Listed(chat int64) bool { _, ok := w.Chats[chat]; return ok }
 
 // Registry is watchers.json; entries are decoded on demand so one bad entry
 // does not hide the others.
 type Registry struct {
 	Path    string
 	Missing bool
+	paths   config.Paths
 	raw     map[string]json.RawMessage
 }
 
-// LoadRegistry reads watchers.json; a missing file is an empty registry.
-func LoadRegistry(path string) (*Registry, error) {
-	r := &Registry{Path: path, raw: map[string]json.RawMessage{}}
-	b, err := os.ReadFile(path)
+// LoadRegistry reads the data dir's watchers.json; a missing file is an empty registry.
+func LoadRegistry(p config.Paths) (*Registry, error) {
+	r := &Registry{Path: p.Watchers(), paths: p, raw: map[string]json.RawMessage{}}
+	b, err := os.ReadFile(r.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		r.Missing = true
 		return r, nil
@@ -108,7 +144,7 @@ func LoadRegistry(path string) (*Registry, error) {
 		return nil, err
 	}
 	if err := json.Unmarshal(b, &r.raw); err != nil {
-		return nil, fmt.Errorf("%s is not a JSON object of watchers: %w", path, err)
+		return nil, fmt.Errorf("%s is not a JSON object of watchers: %w", r.Path, err)
 	}
 	return r, nil
 }
@@ -142,8 +178,29 @@ func (r *Registry) Watcher(name string) (*Watcher, []string) {
 		_ = json.Unmarshal(raw, &e) // keep what parses, for listings
 	}
 	w := &Watcher{
-		Name: name, Scope: e.Scope, Groups: e.Groups != nil && *e.Groups, MentionsOnly: DefaultMentionsOnly,
+		Name: name, Session: strings.TrimSpace(e.Session), Chats: map[int64]string{},
+		Scope: e.Scope, Groups: e.Groups != nil && *e.Groups, MentionsOnly: DefaultMentionsOnly,
 		Approved: strings.TrimSpace(e.Approved),
+	}
+	if validName.MatchString(name) {
+		w.dataDir = r.paths.WatcherDir(name)
+	} else {
+		problems = append(problems, fmt.Sprintf("name %q: use letters, digits, '.', '_', '-' (max 64)", name))
+	}
+	if w.Session == "" {
+		problems = append(problems, "session is missing: set it to the watcher session's id")
+	}
+	for k, v := range e.Chats {
+		id, err := strconv.ParseInt(strings.TrimSpace(k), 10, 64)
+		if err != nil || id == 0 {
+			problems = append(problems, fmt.Sprintf("chats key %q is not a chat id", k))
+			continue
+		}
+		var note string
+		if json.Unmarshal(v, &note) != nil {
+			note = string(v)
+		}
+		w.Chats[id] = note
 	}
 	if e.MentionsOnly != nil {
 		w.MentionsOnly = *e.MentionsOnly
@@ -170,21 +227,21 @@ func (r *Registry) Watcher(name string) (*Watcher, []string) {
 	w.PerChatSeconds = positive("per_chat_seconds", e.PerChatSeconds, DefaultPerChatSeconds)
 	w.BackoffMinutes = positive("backoff_minutes", e.BackoffMinutes, DefaultBackoffMinutes)
 
-	dir, err := expandDir(e.Dir)
-	if err != nil {
-		problems = append(problems, err.Error())
-	} else if st, err := os.Stat(dir); err != nil || !st.IsDir() {
-		problems = append(problems, fmt.Sprintf("dir %s is not a directory", dir))
+	if strings.TrimSpace(e.Dir) != "" {
+		dir, err := expandDir(e.Dir)
+		if err != nil {
+			problems = append(problems, err.Error())
+		} else if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+			problems = append(problems, fmt.Sprintf("dir %s is not a directory", dir))
+		}
+		w.Dir = dir
 	}
-	w.Dir = dir
+	sort.Strings(problems)
 	return w, problems
 }
 
 func expandDir(d string) (string, error) {
 	d = strings.TrimSpace(d)
-	if d == "" {
-		return "", errors.New("dir is missing")
-	}
 	if d == "~" || strings.HasPrefix(d, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -198,50 +255,11 @@ func expandDir(d string) (string, error) {
 	return filepath.Clean(d), nil
 }
 
-// State is a watcher's state.json. The watcher maintains it; other keys are ignored.
-type State struct {
-	ActiveWatcher string           `json:"active_watcher"`
-	Chats         map[int64]string `json:"-"`
-	// BadChats are chat keys that are not numeric ids.
-	BadChats []string `json:"-"`
-}
-
-// LoadState reads state.json.
-func LoadState(path string) (*State, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var raw struct {
-		ActiveWatcher string                     `json:"active_watcher"`
-		Chats         map[string]json.RawMessage `json:"chats"`
-	}
-	if err := json.Unmarshal(b, &raw); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	st := &State{ActiveWatcher: strings.TrimSpace(raw.ActiveWatcher), Chats: map[int64]string{}}
-	for k, v := range raw.Chats {
-		id, err := strconv.ParseInt(strings.TrimSpace(k), 10, 64)
-		if err != nil || id == 0 {
-			st.BadChats = append(st.BadChats, k)
-			continue
-		}
-		var note string
-		if json.Unmarshal(v, &note) != nil {
-			note = string(v)
-		}
-		st.Chats[id] = note
-	}
-	sort.Strings(st.BadChats)
-	return st, nil
-}
-
-// Send is one sends.log line: an attempt that reached Telegram.
+// Send is one sends.jsonl line: an attempt that reached Telegram.
 type Send struct {
 	T        float64 `json:"t"`
 	At       string  `json:"at"`
 	Watcher  string  `json:"watcher"`
-	By       string  `json:"by"`
 	ChatID   int64   `json:"chat_id"`
 	ReplyTo  int     `json:"reply_to,omitempty"`
 	Answered int     `json:"answered,omitempty"`
@@ -301,10 +319,14 @@ func ReadJSONL[T any](path string) (out []T, bad int, err error) {
 	return out, bad, sc.Err()
 }
 
-// AppendJSONL appends one line and syncs it. Callers hold the watch lock.
+// AppendJSONL appends one line (0600, parent dir created 0700) and syncs it.
+// Callers hold the watch lock.
 func AppendJSONL(path string, v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
