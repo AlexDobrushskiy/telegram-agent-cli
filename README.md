@@ -18,10 +18,14 @@ your profile. This tool gives agents the reading part and makes everything else 
 
 - **Read-only by default, enforced on every request.** A gotd middleware checks each MTProto call
   before it leaves the process and refuses anything that is not on an exact allowlist: the 28 read
-  calls the tool makes (dialogs, history, search, resolve, media download) and gotd's own `ping`s.
+  calls the tool and its MTProto library make (dialogs, history, search, resolve, media download,
+  config) plus pings.
   Allowed calls are still refused when they carry a write-like argument (spending Stars, sharing
   location, counting a view, a referral). Read-*named* calls that act, such as pressing a bot button
   or accepting a gift offer, are not on the list.
+- **Every account-changing command is refused in read-only mode** by the binary itself (exit 3,
+  before it touches anything): `send`, every `auth` command except `status` (logins, logout, session
+  import) and `hook install|uninstall` (except `--dry-run`).
 - **Reading leaves no trace.** It never marks messages read, never sets online/typing status, never
   increments channel views.
 - **JSON everywhere**, stable exit codes, no prompts except the interactive login.
@@ -43,6 +47,9 @@ From source: `make build` (writes `bin/telegram-agent-cli`), `make test`, `make 
 
 ## Setup
 
+Setup changes your account and settings, so each step that writes runs with writes switched on for
+that one command (`TGAC_READONLY=0`); everything else stays read-only.
+
 1. **Create an API app.** Sign in at <https://my.telegram.org> with your phone number, open
    **API development tools**, and create an application (any name; platform "Desktop" is fine).
    Note the `api_id` (a number) and `api_hash` (32 hex characters). They identify your app, not
@@ -52,21 +59,22 @@ From source: `make build` (writes `bin/telegram-agent-cli`), `make test`, `make 
    process lists:
 
    ```sh
-   telegram-agent-cli auth init --api-id 1234567 --phone +15550000000
+   TGAC_READONLY=0 telegram-agent-cli auth init --api-id 1234567 --phone +15550000000
    # api_hash: (paste, no echo)
    ```
 
 3. **Log in**, one of:
 
-   - **QR (recommended).** `telegram-agent-cli auth qr` shows a QR code in the terminal. On your
+   - **QR (recommended).** `TGAC_READONLY=0 telegram-agent-cli auth qr` shows a QR code in the terminal. On your
      phone open Telegram → **Settings → Devices → Link Desktop Device** and scan it. If the account
      has a two-step verification password, you are asked for it in the terminal.
-   - **Login code.** `telegram-agent-cli auth request-code` sends a code to your Telegram app, then
-     `telegram-agent-cli auth verify --code 12345`. With two-step verification, put the password in
-     an environment variable and pass its name: `auth verify --code 12345 --password-env TG_2FA`
-     (or run `auth password --password-env TG_2FA` when `verify` returns `"status":"password_needed"`).
+   - **Login code.** `TGAC_READONLY=0 telegram-agent-cli auth request-code` sends a code to your
+     Telegram app, then `TGAC_READONLY=0 telegram-agent-cli auth verify --code 12345`. With
+     two-step verification, put the password in an environment variable and pass its name:
+     `auth verify --code 12345 --password-env TG_2FA` (or run `auth password --password-env TG_2FA`
+     when `verify` returns `"status":"password_needed"`), with `TGAC_READONLY=0` as above.
    - **Import a Telethon session** you already have:
-     `telegram-agent-cli auth import-telethon --session ~/path/to/name.session` (reads the auth key
+     `TGAC_READONLY=0 telegram-agent-cli auth import-telethon --session ~/path/to/name.session` (reads the auth key
      from Telethon's SQLite file, then checks it with `getMe`; `--force` overwrites an existing
      session, `--no-verify` skips the check).
 
@@ -77,8 +85,8 @@ From source: `make build` (writes `bin/telegram-agent-cli`), `make test`, `make 
 5. **Guard your agent** (Claude Code):
 
    ```sh
-   telegram-agent-cli hook install --dry-run   # show the change
-   telegram-agent-cli hook install
+   telegram-agent-cli hook install --dry-run                  # show the change
+   TGAC_READONLY=0 telegram-agent-cli hook install
    ```
 
    Optionally copy [`skills/telegram-agent-cli`](skills/telegram-agent-cli/SKILL.md) to
@@ -125,11 +133,11 @@ telegram-agent-cli media download --chat 123456789 --id 77 --output /tmp/tg-medi
 In read-only mode these fail with exit 3 (`"code":"readonly"`) before connecting. Run them only with
 the account owner's OK on the exact text: `TGAC_READONLY=0 telegram-agent-cli send text --chat 123 --message "…"`.
 
-### Login and maintenance
+### Login and maintenance (needs `TGAC_READONLY=0`, except `auth status`)
 
 `auth init` · `auth qr [--timeout 3m]` · `auth request-code` · `auth verify --code C [--password-env VAR]` ·
 `auth password --password-env VAR` · `auth import-telethon --session PATH` · `auth logout` (terminates
-this session).
+this session). In read-only mode they fail with exit 3 (`"code":"readonly"`) before doing anything.
 
 ### Watchers
 
@@ -184,6 +192,10 @@ Four layers, each independent:
    it) before it is sent. Writes pass only when `TGAC_READONLY` is exactly `0`, `false`, `no` or `off`;
    unset or anything else means read-only. Login methods are allowed only inside `auth`
    subcommands, and approving another device's login (`auth.acceptLoginToken`) is never allowed.
+   The commands themselves are gated too: in read-only mode `send`, every `auth` command but
+   `status`, and `hook install|uninstall` refuse before touching Telegram, the data dir or the
+   settings file. A command is a write unless it is on the binary's read list, so a new or renamed
+   one cannot slip through. The hook therefore only needs to catch the `TGAC_READONLY` override.
 2. **Read-only default in the agent's environment.** `hook install` sets `TGAC_READONLY=1` in Claude
    Code's settings, so a write needs an explicit override in the command itself.
 3. **The PreToolUse hook.** Before Claude Code runs a tool, `telegram-agent-cli hook claude-pretooluse`

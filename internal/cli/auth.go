@@ -24,7 +24,7 @@ import (
 
 func init() {
 	register("", func(*App) *cobra.Command {
-		return group("auth", "Login state (login codes arrive in the owner's Telegram app)")
+		return group("auth", "Login and session (everything but status needs TGAC_READONLY=0)")
 	})
 	for _, ctor := range []commandCtor{
 		(*App).authInitCmd, (*App).authQRCmd, (*App).authRequestCodeCmd, (*App).authVerifyCmd,
@@ -52,7 +52,7 @@ func (a *App) authInitCmd() *cobra.Command {
 	)
 	c := &cobra.Command{
 		Use:   "init",
-		Short: "Store api_id/phone; reads api_hash from stdin (never pass it as an argument)",
+		Short: "Store api_id/phone; reads api_hash from stdin (needs TGAC_READONLY=0)",
 		Long: "Store the my.telegram.org app credentials in config.json (0600).\n" +
 			"api_hash is read from stdin (prompted without echo on a terminal).",
 		Args: noArgs,
@@ -92,7 +92,7 @@ func (a *App) authInitCmd() *cobra.Command {
 func (a *App) authRequestCodeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "request-code",
-		Short: "Send a login code to the owner's Telegram app",
+		Short: "Send a login code to the owner's Telegram app (needs TGAC_READONLY=0)",
 		Args:  noArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			var out map[string]any
@@ -163,7 +163,7 @@ func (a *App) authVerifyCmd() *cobra.Command {
 	var code, pwEnv string
 	c := &cobra.Command{
 		Use:   "verify",
-		Short: "Finish login with the code (and the 2FA password, if the account has one)",
+		Short: "Finish login with the code and, if set, the 2FA password (needs TGAC_READONLY=0)",
 		Args:  noArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			pend, err := a.loadPending()
@@ -207,7 +207,7 @@ func (a *App) authPasswordCmd() *cobra.Command {
 	var pwEnv string
 	c := &cobra.Command{
 		Use:   "password",
-		Short: "Second login step for accounts with 2FA",
+		Short: "Second login step for accounts with 2FA (needs TGAC_READONLY=0)",
 		Args:  noArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			pw := passwordFromEnv(pwEnv)
@@ -238,7 +238,7 @@ func (a *App) authQRCmd() *cobra.Command {
 	var timeout time.Duration
 	c := &cobra.Command{
 		Use:   "qr",
-		Short: "Interactive: scan a QR in Telegram → Settings → Devices → Link Desktop Device",
+		Short: "Interactive QR login: Settings → Devices → Link Desktop Device (needs TGAC_READONLY=0)",
 		Long: "Shows a login QR on stderr; scan it from the owner's phone (Settings → Devices →\n" +
 			"Link Desktop Device). Asks for the 2FA password on this terminal if the account has one.",
 		Args: noArgs,
@@ -314,7 +314,7 @@ func (a *App) authStatusCmd() *cobra.Command {
 func (a *App) authLogoutCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout",
-		Short: "Terminate this session (it disappears from the owner's device list)",
+		Short: "Terminate this session; it leaves the owner's device list (needs TGAC_READONLY=0)",
 		Args:  noArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			opts := a.authOpts()
@@ -341,7 +341,7 @@ func (a *App) authImportTelethonCmd() *cobra.Command {
 	)
 	c := &cobra.Command{
 		Use:   "import-telethon",
-		Short: "Import a Telethon SQLite .session (auth key + entity cache), then verify with getMe",
+		Short: "Import a Telethon .session (auth key + entity cache), verify with getMe (needs TGAC_READONLY=0)",
 		Long: "Reads the Telethon session's `sessions` row (dc_id, server_address, port, auth_key)\n" +
 			"and `entities` access hashes, writes session.json, and checks the login.\n" +
 			"The imported session shares the Telethon session's authorization (same device entry).",

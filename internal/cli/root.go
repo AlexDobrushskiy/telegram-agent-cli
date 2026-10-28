@@ -129,7 +129,8 @@ func (a *App) Root() *cobra.Command {
 		Use:   "telegram-agent-cli",
 		Short: "Safe, read-only-by-default Telegram user-account access for AI agents (JSON out)",
 		Long: "Read your Telegram account (chats, messages, search, mentions, media) as JSON.\n" +
-			"Read-only unless TGAC_READONLY=0|false|no|off; the block is enforced on every MTProto request.\n" +
+			"Read-only unless TGAC_READONLY=0|false|no|off: sends, logins, logout, session import and\n" +
+			"hook install are refused without it, and every MTProto request is checked against a read allowlist.\n" +
 			"Data dir: $TGAC_HOME (default ~/.config/telegram-agent-cli).",
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -150,11 +151,55 @@ func (a *App) Root() *cobra.Command {
 func (a *App) attach(parent *cobra.Command, path string) {
 	for _, ctor := range registry[path] {
 		c := ctor(a)
+		full := strings.TrimSpace(path + " " + c.Name())
 		if c.RunE != nil {
-			c.RunE = mapErrors(c.RunE)
+			c.RunE = mapErrors(gateWrites(full, c.RunE))
 		}
 		parent.AddCommand(c)
-		a.attach(c, strings.TrimSpace(path+" "+c.Name()))
+		a.attach(c, full)
+	}
+}
+
+// readCommands are the commands that work in read-only mode. Every other command
+// that does something (sends, logins, session import, hook edits) is a write and
+// is refused unless TGAC_READONLY is off; a new or renamed command is a write
+// until it is listed here.
+var readCommands = map[string]bool{
+	"chats list": true, "chats show": true,
+	"messages list": true, "messages search": true, "messages show": true,
+	"messages context": true, "messages mentions": true, "messages wait-new": true,
+	"contacts search": true, "media download": true,
+	"me": true, "doctor": true, "version": true, "auth status": true,
+	// Its own gate: registry, scopes and rate limits; the guard grants one send.
+	"watch reply": true, "watch list": true, "watch check": true,
+	"hook claude-pretooluse": true,
+}
+
+// dryRunReads are writes that change nothing with --dry-run.
+var dryRunReads = map[string]bool{"hook install": true, "hook uninstall": true}
+
+// isRead reports whether the leaf command at path (with its parsed flags) is a read.
+func isRead(path string, c *cobra.Command) bool {
+	if readCommands[path] {
+		return true
+	}
+	if dryRunReads[path] {
+		dry, err := c.Flags().GetBool("dry-run")
+		return err == nil && dry
+	}
+	return false
+}
+
+// gateWrites refuses write commands in read-only mode, before they touch anything.
+// Commands that only hold subcommands just print help and are not gated.
+func gateWrites(path string, run func(*cobra.Command, []string) error) func(*cobra.Command, []string) error {
+	return func(c *cobra.Command, args []string) error {
+		if !c.HasSubCommands() && !isRead(path, c) {
+			if err := requireWrite(path); err != nil {
+				return err
+			}
+		}
+		return run(c, args)
 	}
 }
 
@@ -221,10 +266,10 @@ func (a *App) withSession(ctx context.Context, fn func(context.Context, tgclient
 	return a.emit(data)
 }
 
-// requireWrite refuses write commands in read-only mode, before any connection.
+// requireWrite refuses a write command in read-only mode.
 func requireWrite(what string) error {
 	if config.ReadOnly() {
-		return output.ReadOnly("read-only mode: '%s' needs %s=0 (and the user's OK on the exact content)", what, config.EnvReadOnly)
+		return output.ReadOnly("read-only mode: '%s' needs %s=0 (and the account owner's OK)", what, config.EnvReadOnly)
 	}
 	return nil
 }

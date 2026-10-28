@@ -29,9 +29,6 @@ func (a *App) sendTextCmd() *cobra.Command {
 		Short: "Send a text message",
 		Args:  noArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
-			if err := requireWrite("send text"); err != nil {
-				return err
-			}
 			if strings.TrimSpace(text) == "" {
 				return output.Usage("--message is empty")
 			}
@@ -66,9 +63,6 @@ func (a *App) sendFileCmd() *cobra.Command {
 		Short: "Send a file (jpg/png go as photos)",
 		Args:  noArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
-			if err := requireWrite("send file"); err != nil {
-				return err
-			}
 			if st, err := os.Stat(path); err != nil || st.IsDir() {
 				return output.Usage("--path %q is not a readable file", path)
 			}

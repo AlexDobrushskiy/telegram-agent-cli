@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/AlexDobrushskiy/telegram-agent-cli/internal/config"
 )
 
 func TestHookPreToolUse(t *testing.T) {
@@ -58,6 +60,15 @@ func TestHookInstallCommand(t *testing.T) {
 		t.Fatal("dry run wrote the settings")
 	}
 
+	// A real install is a write: refused in read-only mode, before touching the file.
+	h.fail(3, "readonly", "hook", "install", "--settings", settings, "--binary", bin)
+	h.fail(3, "readonly", "hook", "uninstall", "--settings", settings)
+	if _, err := os.Stat(settings); err == nil {
+		t.Fatal("read-only install wrote the settings")
+	}
+	h.ok("hook", "uninstall", "--settings", settings, "--dry-run")
+
+	t.Setenv(config.EnvReadOnly, "0")
 	d = h.ok("hook", "install", "--settings", settings, "--binary", bin)
 	if d["changed"] != true || d["result"] != nil {
 		t.Fatalf("install %v", d)

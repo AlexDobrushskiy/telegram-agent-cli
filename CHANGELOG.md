@@ -11,6 +11,8 @@ All notable changes to this project are documented here. The format follows
   an exact allowlist of read methods (and write-like arguments) before it is sent; writes need
   `TGAC_READONLY=0|false|no|off`.
 - Reading never marks read, never sets online/typing status, never increments channel views.
+- Account-changing commands (`send`, every `auth` command except `status`, `hook install|uninstall`
+  without `--dry-run`) are refused in read-only mode by the binary itself, with exit 3.
 - JSON envelope (`schema_version` 1) and stable exit codes for every command.
 - Login: `auth init`, `auth qr`, `auth request-code` / `auth verify` / `auth password`,
   `auth import-telethon`, `auth status`, `auth logout`.

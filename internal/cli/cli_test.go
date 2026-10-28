@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/AlexDobrushskiy/telegram-agent-cli/internal/config"
 	"github.com/AlexDobrushskiy/telegram-agent-cli/internal/output"
 	"github.com/AlexDobrushskiy/telegram-agent-cli/internal/tgclient"
@@ -305,6 +307,7 @@ func TestMeAndVersion(t *testing.T) {
 
 func TestAuthInit(t *testing.T) {
 	h := newHarness(t)
+	t.Setenv(config.EnvReadOnly, "0")
 	h.app.Stdin = strings.NewReader("0123456789abcdef0123456789abcdef\n")
 	d := h.ok("auth", "init", "--api-id", "12345", "--phone", "+1 555 000 0000")
 	if d["phone"] != "+15550000000" {
@@ -390,6 +393,7 @@ func writeSyntheticTelethon(t *testing.T) string {
 
 func TestImportTelethon(t *testing.T) {
 	h := newHarness(t)
+	t.Setenv(config.EnvReadOnly, "0")
 	src := writeSyntheticTelethon(t)
 	d := h.ok("auth", "import-telethon", "--session", strings.TrimSuffix(src, ".session"), "--no-verify")
 	if d["imported"] != true || d["dc"].(float64) != 2 || d["peers"].(float64) != 2 || d["verified"] != false {
@@ -417,6 +421,7 @@ func TestImportTelethon(t *testing.T) {
 
 func TestLockBusy(t *testing.T) {
 	h := newHarness(t)
+	t.Setenv(config.EnvReadOnly, "0")
 	t.Setenv(config.EnvLockWait, "0.3")
 	_ = h.app.Paths.Ensure()
 	lock := h.app.Paths.NewLock()
@@ -459,4 +464,85 @@ func TestCommandTree(t *testing.T) {
 			t.Errorf("missing command %q", path)
 		}
 	}
+}
+
+// writeCommands lists every leaf command that is not a read, with arguments that
+// would otherwise get past flag parsing.
+var writeCommands = map[string][]string{
+	"auth init":            {"--api-id", "1", "--phone", "+15550000000"},
+	"auth qr":              nil,
+	"auth request-code":    nil,
+	"auth verify":          {"--code", "12345"},
+	"auth password":        {"--password-env", "TGAC_TEST_PW"},
+	"auth logout":          nil,
+	"auth import-telethon": {"--session", "x.session"},
+	"hook install":         {"--binary", "x"},
+	"hook uninstall":       nil,
+	"send text":            {"--chat", "10", "--message", "hi"},
+	"send file":            {"--chat", "10", "--path", "x"},
+}
+
+func leafPaths(c *cobra.Command, prefix string, out map[string]bool) {
+	for _, sub := range c.Commands() {
+		if sub.Name() == "help" {
+			continue
+		}
+		path := strings.TrimSpace(prefix + " " + sub.Name())
+		if sub.HasSubCommands() {
+			leafPaths(sub, path, out)
+		} else {
+			out[path] = true
+		}
+	}
+}
+
+// TestCommandAccessIsPinned: every command is either a known read or a known write.
+func TestCommandAccessIsPinned(t *testing.T) {
+	h := newHarness(t)
+	leaves := map[string]bool{}
+	leafPaths(h.app.Root(), "", leaves)
+	for path := range leaves {
+		if _, write := writeCommands[path]; !readCommands[path] && !write {
+			t.Errorf("command %q is neither in readCommands nor in this test's writeCommands", path)
+		}
+	}
+	for path := range readCommands {
+		if !leaves[path] {
+			t.Errorf("readCommands lists %q, which does not exist", path)
+		}
+	}
+	for path := range writeCommands {
+		if !leaves[path] || readCommands[path] {
+			t.Errorf("write %q missing or also listed as a read", path)
+		}
+	}
+	// Unlisted commands fail closed.
+	if isRead("auth sneaky", h.app.Root()) {
+		t.Error("an unlisted command counts as a read")
+	}
+}
+
+// TestWriteCommandsRefusedReadOnly: in read-only mode every write exits 3 before
+// touching Telegram or the data dir.
+func TestWriteCommandsRefusedReadOnly(t *testing.T) {
+	h := newHarness(t)
+	t.Setenv("TGAC_TEST_PW", "pw")
+	h.app.Stdin = strings.NewReader("0123456789abcdef0123456789abcdef\n")
+	for _, v := range []string{"", "1", "true", "yes"} {
+		t.Setenv(config.EnvReadOnly, v)
+		for path, args := range writeCommands {
+			e := h.fail(3, output.CodeReadOnly, append(strings.Fields(path), args...)...)
+			if !strings.Contains(e.Message, "'"+path+"'") || !strings.Contains(e.Message, "TGAC_READONLY=0") {
+				t.Errorf("%s: message %q", path, e.Message)
+			}
+		}
+	}
+	if h.raws != 0 || h.connects != 0 {
+		t.Fatalf("refused writes connected: raw=%d session=%d", h.raws, h.connects)
+	}
+	if _, err := os.Stat(h.app.Paths.Home); err == nil {
+		t.Fatal("a refused write created the data dir")
+	}
+	// auth status stays a read.
+	h.ok("auth", "status")
 }
