@@ -9,7 +9,7 @@ All notable changes to this project are documented here. The format follows
 
 - MTProto user-account client (gotd) with a read-only middleware: every request is checked against
   an exact allowlist of read methods (and write-like arguments) before it is sent; writes need
-  `TGAC_READONLY=0|false|no|off`.
+  `TGAC_READONLY=0|false|no|off` (case-insensitive, trimmed).
 - Reading never marks read, never sets online/typing status, never increments channel views.
 - Account-changing commands (`send`, every `auth` command except `status`, `hook install|uninstall`
   without `--dry-run`) are refused in read-only mode by the binary itself, with exit 3.

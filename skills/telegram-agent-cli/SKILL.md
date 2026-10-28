@@ -17,7 +17,7 @@ sets `TGAC_READONLY=0`. Check it with `telegram-agent-cli doctor` (`authorized`,
 | One chat's messages | `telegram-agent-cli messages list --chat <id\|@username\|+phone\|name> --limit 50 --asc` (`--after 2026-01-01`, `--before`, `--min-id N` = newer than N, `--offset-id` = older page from `data.next_offset_id`, `--topic N` for forums) |
 | Search everything | `telegram-agent-cli messages search "words" --limit 30` (account-wide; `--chat X` for one chat, `--from Y` with `--chat`, `--after/--before`) |
 | Around a message | `telegram-agent-cli messages context --chat X --id N --around 8`; exact ones: `messages show --chat X --id N,M` |
-| Mentions of the user | `telegram-agent-cli messages mentions --unread` (`--chat X`, `--limit`) |
+| Mentions of the user | `telegram-agent-cli messages mentions --unread` (`--chat X`, `--limit`; without `--chat`/`--unread`, `--scan N` = how many recent groups to search, default 50) |
 | About a chat | `telegram-agent-cli chats show --chat X` |
 | Find a person or channel | `telegram-agent-cli contacts search "name"` (`mine` = their contacts and chats, `public` = directory) |
 | A photo, voice note or file | `telegram-agent-cli media download --chat X --id N --output <scratch dir>` |
@@ -54,9 +54,9 @@ unless the user asked for that message there. Spam-shaped use gets accounts bann
 ## Guard rails (already enforced; don't work around them)
 
 - The binary refuses every non-read Telegram request unless `TGAC_READONLY` is `0|false|no|off`
-  (sends, edits, deletes, reactions, mark-read, typing, joins/leaves, profile changes, bot buttons),
-  and refuses every account-changing command the same way: `send`, all `auth` commands except
-  `status` (logins, logout, session import), `hook install|uninstall`.
+  (case-insensitive, trimmed) (sends, edits, deletes, reactions, mark-read, typing, joins/leaves,
+  profile changes, bot buttons), and refuses every account-changing command the same way: `send`,
+  all `auth` commands except `status` (logins, logout, session import), `hook install|uninstall`.
 - If the guard hook is installed, a permission prompt appears for any non-read command, any
   `TGAC_READONLY` override, any reference to the data dir (`~/.config/telegram-agent-cli` or
   `$TGAC_HOME`), raw MTProto scripts, and file-tool access to the session or config. The prompt is a

@@ -33,6 +33,15 @@ func TestHookPreToolUse(t *testing.T) {
 			t.Errorf("%s: output %q, want ask=%v", payload, out.String(), ask)
 		}
 	}
+	// --help alone prints the command's help, not a decision
+	out0 := &bytes.Buffer{}
+	h.app.Stdout = out0
+	h.app.Stdin = strings.NewReader(`{"tool_name":"Bash","tool_input":{"command":"telegram-agent-cli send text"}}`)
+	if code := h.app.Execute(context.Background(), []string{"hook", "claude-pretooluse", "--help"}); code != 0 ||
+		!strings.Contains(out0.String(), "PreToolUse hook") || strings.Contains(out0.String(), `"permissionDecision":"ask"`) {
+		t.Errorf("--help: exit %d out %q", code, out0.String())
+	}
+
 	// unexpected args never fail the hook
 	out := &bytes.Buffer{}
 	h.app.Stdout = out

@@ -45,7 +45,10 @@ func (a *App) hookPreToolUseCmd() *cobra.Command {
 			"\"ask\" so the account owner approves that exact call; otherwise prints nothing. Always exits 0.",
 		// Never fail: a hook error would block every tool call.
 		DisableFlagParsing: true,
-		RunE: func(*cobra.Command, []string) error {
+		RunE: func(c *cobra.Command, args []string) error {
+			if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
+				return c.Help()
+			}
 			_ = hook.Run(a.Stdin, a.Stdout, a.hookOptions())
 			return nil
 		},

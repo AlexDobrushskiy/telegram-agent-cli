@@ -109,7 +109,7 @@ scripts. Dates are ISO 8601, UTC.
 | `messages search QUERY [--chat X] [--from Y] [--limit 30] [--after DATE] [--before DATE]` | Full-text search, account-wide without `--chat` |
 | `messages show --chat X --id N[,N…]` | Specific messages |
 | `messages context --chat X --id N [--around 8]` | A message with its neighbours |
-| `messages mentions [--chat X] [--unread] [--limit 30]` | Messages that @-mention or reply to you (`--unread` does not mark them read) |
+| `messages mentions [--chat X] [--unread] [--limit 30] [--scan 50]` | Messages that @-mention or reply to you (`--unread` does not mark them read). Without `--chat` or `--unread` it searches your `--scan` most recent groups |
 | `messages wait-new --state FILE [--chats ID,…] [--dms] [--groups] [--mentions] [--timeout 600] [--interval 30] [--since DATE]` | Block until new incoming messages arrive after the watermark in FILE, return them, advance the watermark. First run records the watermark and returns `[]`. Empty list on timeout |
 | `contacts search QUERY [--limit 20]` | Your contacts and chats (`mine`), then Telegram's public directory (`public`) |
 | `media download --chat X --id N --output DIR` | Save a message's photo/voice/file; returns the path |
@@ -189,38 +189,56 @@ Four layers, each independent:
 
 1. **MTProto middleware (in the binary).** Every request is checked against an exact allowlist of
    read methods (pinned by a test that walks every request type in gotd, so an upgrade cannot widen
-   it) before it is sent. Writes pass only when `TGAC_READONLY` is exactly `0`, `false`, `no` or `off`;
-   unset or anything else means read-only. Login methods are allowed only inside `auth`
-   subcommands, and approving another device's login (`auth.acceptLoginToken`) is never allowed.
-   The commands themselves are gated too: in read-only mode `send`, every `auth` command but
-   `status`, and `hook install|uninstall` refuse before touching Telegram, the data dir or the
-   settings file. A command is a write unless it is on the binary's read list, so a new or renamed
-   one cannot slip through. The hook therefore only needs to catch the `TGAC_READONLY` override.
+   it) before it is sent. Writes pass only when `TGAC_READONLY` is `0`, `false`, `no` or `off`
+   (case-insensitive, surrounding spaces ignored); unset or anything else means read-only. Login
+   methods are allowed only inside `auth` subcommands, and approving another device's login
+   (`auth.acceptLoginToken`) is never allowed. The commands themselves are gated too: in read-only
+   mode `send`, every `auth` command but `status`, and `hook install|uninstall` refuse before
+   touching Telegram, the data dir or the settings file. A command is a write unless it is on the
+   binary's read list, so a new or renamed one cannot slip through. This is the main barrier; the
+   hook's jobs are catching the `TGAC_READONLY` override, protecting the data dir and the Claude Code
+   settings, and flagging calls off the read list.
 2. **Read-only default in the agent's environment.** `hook install` sets `TGAC_READONLY=1` in Claude
    Code's settings, so a write needs an explicit override in the command itself.
 3. **The PreToolUse hook.** Before Claude Code runs a tool, `telegram-agent-cli hook claude-pretooluse`
-   inspects it (Bash, and Monitor's background commands, the same way) and forces a permission prompt ("ask") when the call:
+   inspects it (Bash, and Monitor's background commands, the same way) and forces a permission
+   prompt ("ask") when the call:
    - runs `telegram-agent-cli` with a subcommand off the read list (`send`, `auth` other than `status`,
      `hook install`, unknown ones), including through `sudo`, `env`, `timeout`, `xargs`, `sh -c`,
      `bash -lc`, `eval`, `ssh host …`, `find -exec`, `$(…)`, pipes, heredocs fed to a shell, shell
      scripts it can read, or `go run …/cmd/telegram-agent-cli`;
-   - sets `TGAC_READONLY` to a false, empty or computed value, or mentions `TGAC_HOME`;
-   - references the data dir (absolute, `~`, `$HOME` forms) or mixes an MTProto library (Telethon,
-     gotd, Pyrogram…) with a session file;
+   - sets `TGAC_READONLY` to a false, empty or computed value, or sets or reads `TGAC_HOME`;
+   - references a data dir: `$TGAC_HOME` and the default `~/.config/telegram-agent-cli`, written as
+     an absolute path, `~/…`, `$HOME/…`, `${HOME}/…`, `$XDG_CONFIG_HOME/…` or a relative `.config/…`,
+     compared case-insensitively (a longer name such as `telegram-agent-cli-notes.md` is not the dir);
+   - mixes an MTProto library (Telethon, gotd, Pyrogram…) with a session file;
    - uses Read on `config.json`, `session.json`, `peers.json` or `pending-login.json` in the data dir,
-     Grep inside it, or Edit/Write/MultiEdit/NotebookEdit anywhere under it.
+     Grep with a path inside the data dir, or Edit/Write/MultiEdit/NotebookEdit anywhere under it.
 
    The name inside an argument does not count: `git commit -m "…telegram-agent-cli send…"`,
-   `grep telegram-agent-cli README.md` or a `claude -p "…"` prompt pass silently. In non-interactive
-   runs, where nobody can answer the prompt, the call does not run.
+   `grep telegram-agent-cli README.md` or a `claude -p "…"` prompt pass silently. Values of
+   `-m`/`--message`/`--body`/`--title` and grep/rg/`git grep` patterns are treated as text, unless
+   they contain an expansion such as `$(…)`.
+
+   How Claude Code handles "ask" (verified 2026-10-28 on Claude Code 2.1.307): interactive sessions
+   show the permission prompt in every mode, including `bypassPermissions`; in headless `claude -p`
+   runs, where nobody can answer, the call is denied.
 4. **Watchers** have their own gate (registry, scopes, rate limits, pause files); see below.
 
-**Limits.** The hook is a second check, not a sandbox. An agent with shell access can obfuscate a
-command, write its own MTProto client and point it at the session file, or edit files the hook
-cannot see. The session file is the real boundary: it is full access to the account. If you run
-agents you don't trust, run them as a different OS user or in a container that cannot read the
-data dir. The prompt the hook shows is a question to you, not your approval; approve only commands
-you have read.
+**Limits.** The hook is a second check, not a sandbox:
+
+- Code running as your OS user can read the session file. The hook only sees the tool call, not
+  what a program does once it runs.
+- Interpreters (`python -c`, `node -e`, scripts) are checked by text only: the hook asks when code
+  overrides `TGAC_READONLY`, touches the data dir or pairs an MTProto library with a session, but it
+  does not follow what the code computes. An agent can obfuscate a command or write its own MTProto
+  client.
+- Files the hook cannot read (unreadable, not a regular file) are not scanned.
+- The prompt is a question to you, not your approval. In `bypassPermissions` mode it is the only
+  thing between the agent and the command, so read each one before approving.
+
+The session file is the real boundary: it is full access to the account. If you run agents you
+don't trust, run them as a different OS user or in a container that cannot read the data dir.
 
 ## Watchers
 
@@ -322,7 +340,7 @@ Environment:
 | Variable | |
 |---|---|
 | `TGAC_HOME` | data dir |
-| `TGAC_READONLY` | `0`/`false`/`no`/`off` enables writes; anything else, or unset, is read-only |
+| `TGAC_READONLY` | `0`/`false`/`no`/`off` (case-insensitive, spaces trimmed) enables writes; anything else, or unset, is read-only |
 | `TGAC_LOCK_WAIT` | seconds to wait for the account lock (default 90) |
 | `TGAC_WATCHER_SESSION` | the calling agent session's id, for `watch reply` |
 | `CLAUDE_CONFIG_DIR` | where `hook install` finds `settings.json` (default `~/.claude`) |
@@ -330,22 +348,26 @@ Environment:
 ## Claude Code hook details
 
 `hook install` edits `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`, or
-`--settings PATH`): it sets `env.TGAC_READONLY` to `"1"` and adds two `PreToolUse` entries, matcher
+`--settings PATH`). It sets `env.TGAC_READONLY` to `"1"` and adds two `PreToolUse` entries, matcher
 `Bash|Monitor` and matcher `Read|Edit|Write|MultiEdit|NotebookEdit|Grep`, each running
-`<absolute path of this binary> hook claude-pretooluse` with `"timeout": 10` and `"onFailure": "block"`
-(fail closed: if the hook cannot start, crashes or times out, the tool call is blocked; `onFailure`
-needs Claude Code 2.1.295 or later, older versions ignore it and let the call through). The hook
-itself gives up after 3 seconds and asks instead of waiting. It keeps every other key, keeps their order,
-appends to an existing entry with the same matcher instead of adding a second one, moves the guard
-out of entries with an older matcher (such as plain `Bash`), updates the path if the binary moved, writes atomically, and saves the previous file as `settings.json.bak-YYYYMMDD-HHMMSS`.
-Running it again changes nothing. `--dry-run` prints the diff and the resulting settings. Use
-`--binary PATH` when the binary is reached through a package manager's stable path. `hook uninstall`
-removes the entries and `TGAC_READONLY=1`.
+`<absolute path of this binary> hook claude-pretooluse` with `"timeout": 10` and
+`"onFailure": "block"`. That fails closed: if the hook cannot start, crashes or times out, the tool
+call is blocked. `onFailure` needs Claude Code 2.1.295 or later; older versions ignore it and let the
+call through. The hook itself gives up after 3 seconds and asks instead of waiting.
+
+It keeps every other key and their order, appends to an existing entry with the same matcher instead
+of adding a second one, moves the guard out of entries with an older matcher (such as plain `Bash`),
+and updates the path if the binary moved. It writes atomically and saves the previous file as
+`settings.json.bak-YYYYMMDD-HHMMSS` (with a `-N` suffix if that name exists). When `settings.json`
+is a symlink, the link is kept: the target file is rewritten and the backup sits next to the target,
+named after it. Running it again changes nothing. `--dry-run` prints the diff and the resulting
+settings. Use `--binary PATH` when the binary is reached through a package manager's stable path.
+`hook uninstall` removes the entries and `TGAC_READONLY=1`.
 
 For other agent harnesses, the hook reads Claude Code's PreToolUse JSON on stdin
 (`{"tool_name":"Bash","tool_input":{"command":"…"},"cwd":"…"}`) and prints
 `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"…"}}`
-or nothing; it always exits 0.
+or nothing; it always exits 0. `hook claude-pretooluse --help` prints its own help.
 
 ## License
 
