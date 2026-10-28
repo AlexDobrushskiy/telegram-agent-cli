@@ -214,10 +214,13 @@ Four layers, each independent:
      `osascript`, heredocs, script files): string literals after the name are its argv
      (`['telegram-agent-cli', 'auth', 'logout']`), a literal holding a whole command line is parsed
      as shell, and a call the hook can't resolve (a variable, concatenation, `%`-format) asks;
-   - runs content it can't see: a pipe into a shell or interpreter from anything but literal
-     `echo`/`printf`/`cat` (`… | base64 -d | sh`, `curl … | bash`), `bash <(…)`, `source <(…)`,
-     `sh -c "$(…)"`, `eval "$(…)"`, a script named by a variable, or a script that isn't a readable
-     regular file (a FIFO, a device);
+   - runs content it can't see (a pipe into a shell or interpreter from anything but literal
+     `echo`/`printf`/`cat`, `bash <(…)`, `source <(…)`, `sh -c "$(…)"`, `eval "$(…)"`, a script named
+     by a variable, a script that isn't a readable regular file) when that content is decoded on the
+     way in (`base64 -d`, `xxd -r`, `openssl enc -d`, `uudecode`, `rev`, `tr`), or when the visible
+     command also names the binary, a `TGAC_` variable, the watcher variable, the data dir or an
+     MTProto library. Otherwise `curl … | bash`, `eval "$(ssh-agent -s)"` and `bash "$SCRIPT"` pass,
+     since the hook runs on every Bash call, not only Telegram ones;
    - sets `TGAC_READONLY` to a false, empty or computed value in any form: `export
      TGAC_READ''ONLY=0`, `read`/`printf -v`/`for`/`declare -n`, `${TGAC_READONLY:=0}`, or code such as
      `os.environ['TGAC_READONLY'] = str(0)` and `$ENV{TGAC_READONLY}=0` (only a plain literal that
@@ -271,7 +274,10 @@ Four layers, each independent:
   past it. An agent can also write its own MTProto client.
 - Programs that run other files on their own (`make`, `go test`, `npm run`) are not followed; their
   files are checked when an agent writes them with the file tools or a heredoc, not when they run.
-- Files the hook can't read (unreadable, not a regular file, over 1 MiB) ask instead of passing.
+- Content the hook can't see (a download piped into a shell, `$(…)` run as code, an unreadable
+  script) is only flagged when it is decoded on the way in or the visible command links to the
+  account. Obfuscated content with no visible link to the tool isn't caught; the binary's own write
+  gate (`TGAC_READONLY`) is the main barrier.
 - The prompt is a question to you, not your approval. In `bypassPermissions` mode it is the only
   thing between the agent and the command, so read each one before approving.
 

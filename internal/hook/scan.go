@@ -109,7 +109,10 @@ type scanner struct {
 	files   map[string]bool
 	env     map[string]envKind // protected variables
 	dirs    [][]string         // data dirs as path components
-	st      pathState
+	// content the guard can't see; reported only when decoded or when the
+	// visible command links to the account
+	hiddenRs []hiddenReason
+	st       pathState
 }
 
 func newScanner(o Options) *scanner {
@@ -131,6 +134,14 @@ func (s *scanner) scanTop(cmd string) string {
 	}
 	s.script(lx, ctx{})
 	text := blank(cmd, s.inert)
+	if len(s.hiddenRs) > 0 {
+		related := s.related(text)
+		for _, h := range s.hiddenRs {
+			if h.decoded || related {
+				s.reasons.add(h.reason)
+			}
+		}
+	}
 	if mentionRe.MatchString(text) {
 		for _, r := range s.cond {
 			s.reasons.add(r)
@@ -429,7 +440,7 @@ func (s *scanner) argv(words []token, cmd *command, c ctx) {
 	case name == "eval":
 		for _, a := range args {
 			if len(a.subs) > 0 {
-				s.reasons.add(reasonBuilt)
+				s.hidden(reasonBuilt, s.subsDecode(a.subs))
 			}
 		}
 		s.str(joinWords(args), c)
@@ -537,14 +548,14 @@ func (s *scanner) pipedIn(cmd *command, c ctx, run func(string)) {
 					if b, err := s.o.ReadFile(s.abs(a.text)); err == nil {
 						run(string(b))
 					} else if !errorsIsNotExist(err) {
-						s.reasons.add("runs piped code the guard can't read")
+						s.hidden("runs piped code the guard can't read", false)
 					}
 				}
 				return
 			}
 		}
 	}
-	s.reasons.add("runs code from a pipe the guard can't see (" + pipeSource(p) + ")")
+	s.hidden("runs code from a pipe the guard can't see ("+pipeSource(p)+")", pipeDecodes(p))
 }
 
 func pipeSource(p *command) string {
@@ -575,7 +586,7 @@ func (s *scanner) ssh(args []token, cmd *command, c ctx) {
 		if rest := args[i:]; len(rest) > 0 {
 			for _, a := range rest {
 				if len(a.subs) > 0 {
-					s.reasons.add(reasonBuilt)
+					s.hidden(reasonBuilt, s.subsDecode(a.subs))
 				}
 			}
 			s.str(joinWords(rest), c)
@@ -638,7 +649,7 @@ func (s *scanner) file(p string, mode fileMode, c ctx) {
 		b, err := s.o.ReadFile(full)
 		if err != nil {
 			if !errorsIsNotExist(err) {
-				s.reasons.add("runs " + base(full) + ", which the guard can't read (" + err.Error() + ")")
+				s.hidden("runs "+base(full)+", which the guard can't read ("+err.Error()+")", false)
 			}
 			return
 		}

@@ -214,7 +214,7 @@ func (s *scanner) interpreter(name string, args []token, cmd *command, c ctx) {
 	runCode := func(t token) {
 		sawCode = true
 		if len(t.subs) > 0 {
-			s.reasons.add("runs interpreter code built at run time")
+			s.hidden("runs interpreter code built at run time", s.subsDecode(t.subs))
 		}
 		s.code(t.text, c)
 	}

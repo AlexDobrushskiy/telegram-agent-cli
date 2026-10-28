@@ -27,7 +27,7 @@ func gluedValue(f string, flags map[string]bool) (string, bool) {
 // cmdString analyses a word holding a shell command (sh -c, watch, hyperfine).
 func (s *scanner) cmdString(w token, c ctx) {
 	if len(w.subs) > 0 {
-		s.reasons.add(reasonBuilt)
+		s.hidden(reasonBuilt, s.subsDecode(w.subs))
 	}
 	s.str(w.text, c)
 }
@@ -35,7 +35,7 @@ func (s *scanner) cmdString(w token, c ctx) {
 // scriptArg analyses a script named by a word (bash FILE, source FILE).
 func (s *scanner) scriptArg(w token, c ctx) {
 	if w.dynamic || w.glob {
-		s.reasons.add(reasonUnseen + " (" + w.text + ")")
+		s.hidden(reasonUnseen+" ("+w.text+")", s.subsDecode(w.subs))
 		return
 	}
 	s.file(w.text, modeShell, c)
@@ -161,7 +161,7 @@ func (s *scanner) watch(args []token, c ctx) {
 		rest := args[i:]
 		for _, a := range rest {
 			if len(a.subs) > 0 {
-				s.reasons.add(reasonBuilt)
+				s.hidden(reasonBuilt, s.subsDecode(a.subs))
 			}
 		}
 		s.str(joinWords(rest), c)

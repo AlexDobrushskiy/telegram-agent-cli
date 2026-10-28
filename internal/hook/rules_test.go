@@ -455,11 +455,14 @@ func TestReadScriptOnlyRegularFiles(t *testing.T) {
 	go func() { done <- CheckBash("bash fifo.sh", o) }()
 	select {
 	case r := <-done:
-		if !strings.Contains(strings.Join(r, ";"), "can't read") {
-			t.Errorf("fifo: %v, want an ask", r)
+		if len(r) != 0 {
+			t.Errorf("unrelated fifo: %v, want silent", r)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("reading a FIFO script blocked")
+	}
+	if r := CheckBash("bash fifo.sh && telegram-agent-cli me", o); !strings.Contains(strings.Join(r, ";"), "can't read") {
+		t.Errorf("fifo next to the binary: %v, want an ask", r)
 	}
 	if _, err := readScript(fifo); err == nil {
 		t.Error("readScript opened a FIFO")
