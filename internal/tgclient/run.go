@@ -41,6 +41,8 @@ type Options struct {
 	NeedAuth   bool // fail with an auth error unless the session is logged in
 	// UpdateHandler enables updates (needed for QR login); nil means no updates.
 	UpdateHandler telegram.UpdateHandler
+	// Middlewares run after the read-only guard, i.e. they see only what goes to the network.
+	Middlewares []telegram.Middleware
 }
 
 // Conn is a locked, connected client handed to Run's callback.
@@ -86,10 +88,10 @@ func Run(ctx context.Context, opts Options, fn func(ctx context.Context, c *Conn
 	cache := LoadPeerCache(p.Peers())
 	client := telegram.NewClient(cfg.APIID, cfg.APIHash, telegram.Options{
 		SessionStorage: &FileStorage{Path: p.Session(), Write: p.WritePrivate},
-		Middlewares: []telegram.Middleware{
+		Middlewares: append([]telegram.Middleware{
 			guard.Middleware(config.ReadOnly, opts.AuthMode),
 			FloodWaitMiddleware(floodSleepThreshold, 3),
-		},
+		}, opts.Middlewares...),
 		Device: telegram.DeviceConfig{
 			DeviceModel:    cfg.DeviceModel,
 			SystemVersion:  cfg.SystemVersion,

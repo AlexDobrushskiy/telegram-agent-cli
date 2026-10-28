@@ -5,7 +5,7 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X $(PKG).Version=$(VERSION) -X $(PKG).Commit=$(COMMIT) -X $(PKG).Date=$(DATE)
 
-.PHONY: build test lint fmt vet tidy clean
+.PHONY: build test e2e lint fmt vet tidy clean
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/$(BINARY) ./cmd/$(BINARY)
@@ -13,8 +13,13 @@ build:
 test:
 	go test ./...
 
+# Read-only checks against the real account in $$TGAC_HOME.
+e2e:
+	TGAC_E2E=1 go test -tags e2e -count=1 -v ./e2e/
+
 vet:
 	go vet ./...
+	go vet -tags e2e ./e2e/
 
 fmt:
 	gofmt -w .
