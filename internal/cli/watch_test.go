@@ -49,6 +49,16 @@ type grantFake struct {
 	*tgfake.Fake
 	t        *testing.T
 	failSend error
+	// onHistory runs once, on the first History call (mid-check).
+	onHistory func()
+}
+
+func (g *grantFake) History(ctx context.Context, p *tgclient.Peer, q tgclient.HistoryQuery) ([]tgclient.Message, error) {
+	if f := g.onHistory; f != nil {
+		g.onHistory = nil
+		f()
+	}
+	return g.Fake.History(ctx, p, q)
 }
 
 type nopInvoker struct{}
@@ -155,18 +165,31 @@ func (h *watchHarness) add(chat int64, id int, fromMe bool, text string, ago tim
 
 func (h *watchHarness) dir(name string) string { return filepath.Join(h.root, name) }
 
-// addWatcher registers name with a state.json whose active watcher is session.
+// addWatcher registers name bound to session, with chats as its allowlist.
 func (h *watchHarness) addWatcher(name, session string, fields map[string]any, chats ...int64) {
 	if err := os.MkdirAll(h.dir(name), 0o700); err != nil {
 		h.t.Fatal(err)
 	}
-	e := map[string]any{"dir": h.dir(name), "scope": "listed", "approved": "test fixture"}
+	e := map[string]any{"dir": h.dir(name), "session": session, "scope": "listed", "approved": "test fixture"}
 	for k, v := range fields {
 		e[k] = v
 	}
 	h.reg[name] = e
-	h.writeRegistry()
-	h.writeState(name, session, chats...)
+	h.setChats(name, chats...)
+}
+
+// setChats replaces name's allowlist in the registry.
+func (h *watchHarness) setChats(name string, chats ...int64) {
+	m := map[string]string{}
+	for _, c := range chats {
+		m[strconv.FormatInt(c, 10)] = "note"
+	}
+	h.set(name, "chats", m)
+}
+
+// logPath is name's send log in the data dir.
+func (h *watchHarness) logPath(name string) string {
+	return filepath.Join(h.app.Paths.WatcherDir(name), watch.LogFile)
 }
 
 func (h *watchHarness) set(name, key string, v any) {
@@ -177,15 +200,6 @@ func (h *watchHarness) set(name, key string, v any) {
 func (h *watchHarness) writeRegistry() {
 	b, _ := json.Marshal(h.reg)
 	h.write(h.app.Paths.Watchers(), string(b))
-}
-
-func (h *watchHarness) writeState(name, session string, chats ...int64) {
-	m := map[string]string{}
-	for _, c := range chats {
-		m[strconv.FormatInt(c, 10)] = "note"
-	}
-	b, _ := json.Marshal(map[string]any{"active_watcher": session, "chats": m})
-	h.write(filepath.Join(h.dir(name), watch.StateFile), string(b))
 }
 
 func (h *watchHarness) write(path, content string) {
@@ -255,17 +269,25 @@ func TestWatchReplyRefusals(t *testing.T) {
 		{"zero per_hour", func(h *watchHarness) { h.set("sales", "per_hour", 0) }, cLead, nil, "", watch.RuleInvalid},
 		{"relative dir", func(h *watchHarness) { h.set("sales", "dir", "watchers/sales") }, cLead, nil, "", watch.RuleInvalid},
 		{"missing dir", func(h *watchHarness) { h.set("sales", "dir", filepath.Join(h.root, "nope")) }, cLead, nil, "", watch.RuleInvalid},
-		{"pause", func(h *watchHarness) { h.write(filepath.Join(h.dir("sales"), watch.PauseFile), "") }, cLead, nil, "", watch.RulePaused},
-		{"no state", func(h *watchHarness) { os.Remove(filepath.Join(h.dir("sales"), watch.StateFile)) }, cLead, nil, "", watch.RuleState},
-		{"bad state", func(h *watchHarness) { h.write(filepath.Join(h.dir("sales"), watch.StateFile), "{") }, cLead, nil, "", watch.RuleState},
-		{"caller unset", func(h *watchHarness) { delete(h.env, envSession) }, cLead, nil, "", watch.RuleNotActive},
-		{"caller differs", func(h *watchHarness) { h.env[envSession] = sessB }, cLead, nil, "", watch.RuleNotActive},
-		{"no active watcher", func(h *watchHarness) { h.writeState("sales", "", cLead) }, cLead, nil, "", watch.RuleNotActive},
+		{"pause in watcher dir", func(h *watchHarness) { h.write(filepath.Join(h.dir("sales"), watch.PauseFile), "") }, cLead, nil, "", watch.RulePaused},
+		{"pause in data dir", func(h *watchHarness) {
+			h.write(filepath.Join(h.app.Paths.WatcherDir("sales"), watch.PauseFile), "")
+		}, cLead, nil, "", watch.RulePaused},
+		{"session missing", func(h *watchHarness) { delete(h.reg["sales"], "session"); h.writeRegistry() }, cLead, nil, "", watch.RuleInvalid},
+		{"bad chats key", func(h *watchHarness) { h.set("sales", "chats", map[string]string{"abc": "n"}) }, cLead, nil, "", watch.RuleInvalid},
+		{"bad name", func(h *watchHarness) { h.reg["../x"] = h.reg["sales"]; h.writeRegistry() }, cLead, []string{"--watcher", "../x"}, "", watch.RuleInvalid},
+		{"state.json in the watcher dir is ignored", func(h *watchHarness) {
+			h.write(filepath.Join(h.dir("sales"), "state.json"),
+				`{"active_watcher":"`+sessA+`","chats":{"`+strconv.FormatInt(cStranger, 10)+`":"x"}}`)
+		}, cStranger, nil, "", watch.RuleScope},
+		{"caller unset", func(h *watchHarness) { delete(h.env, envSession) }, cLead, nil, "", watch.RuleSession},
+		{"caller differs", func(h *watchHarness) { h.env[envSession] = sessB }, cLead, nil, "", watch.RuleSession},
+		{"empty session binding", func(h *watchHarness) { h.set("sales", "session", "  ") }, cLead, nil, "", watch.RuleInvalid},
 		{"empty text", nil, cLead, nil, "   ", watch.RuleTextLength},
 		{"long text", func(h *watchHarness) { h.set("sales", "max_chars", 10) }, cLead, nil, "eleven chars", watch.RuleTextLength},
 		{"rate per watcher", func(h *watchHarness) {
 			h.set("sales", "per_hour", 2)
-			log := filepath.Join(h.dir("sales"), watch.LogFile)
+			log := h.logPath("sales")
 			h.appendLine(log, h.send(-2*time.Hour, cMutual)) // too old to count
 			h.appendLine(log, h.send(-50*time.Minute, cMutual))
 			failed := h.send(-40*time.Minute, cMutual)
@@ -278,7 +300,7 @@ func TestWatchReplyRefusals(t *testing.T) {
 			}
 			h.addWatcher("other", sessB, nil)
 			for i := 0; i < 3; i++ {
-				h.appendLine(filepath.Join(h.dir("other"), watch.LogFile), h.send(-10*time.Minute, cMutual))
+				h.appendLine(h.logPath("other"), h.send(-10*time.Minute, cMutual))
 			}
 		}, cLead, nil, "", watch.RuleRateGlobal},
 		{"rate global via ledger", func(h *watchHarness) {
@@ -289,19 +311,27 @@ func TestWatchReplyRefusals(t *testing.T) {
 				h.appendLine(h.app.Paths.Answered(), h.answer(-10*time.Minute, cMutual, 1, 50+i))
 			}
 		}, cLead, nil, "", watch.RuleRateGlobal},
+		{"rate per watcher via ledger", func(h *watchHarness) {
+			h.set("sales", "per_hour", 2)
+			for i := 0; i < 2; i++ {
+				a := h.answer(-20*time.Minute, cMutual, 1, 60+i)
+				a.Watcher = "sales"
+				h.appendLine(h.app.Paths.Answered(), a)
+			}
+		}, cLead, nil, "", watch.RuleRateWatcher},
 		{"chat spacing", func(h *watchHarness) {
 			h.appendLine(h.app.Paths.Answered(), h.answer(-10*time.Second, cLead, 1, 99))
 		}, cLead, nil, "", watch.RuleChatSpacing},
-		{"saved messages", func(h *watchHarness) { h.writeState("sales", sessA, meID) }, meID, nil, "", watch.RuleChatType},
-		{"bot", func(h *watchHarness) { h.writeState("sales", sessA, cBot) }, cBot, nil, "", watch.RuleChatType},
-		{"channel", func(h *watchHarness) { h.writeState("sales", sessA, cChannel) }, cChannel, []string{"--reply-to", "1"}, "", watch.RuleChatType},
+		{"saved messages", func(h *watchHarness) { h.setChats("sales", meID) }, meID, nil, "", watch.RuleChatType},
+		{"bot", func(h *watchHarness) { h.setChats("sales", cBot) }, cBot, nil, "", watch.RuleChatType},
+		{"channel", func(h *watchHarness) { h.setChats("sales", cChannel) }, cChannel, []string{"--reply-to", "1"}, "", watch.RuleChatType},
 		{"group without groups", func(h *watchHarness) { h.set("sales", "groups", false) }, cGroup, []string{"--reply-to", "2"}, "", watch.RuleChatType},
 		{"listed: not listed", nil, cStranger, nil, "", watch.RuleScope},
 		{"contacts: not mutual", func(h *watchHarness) { h.set("sales", "scope", "contacts") }, cStranger, nil, "", watch.RuleScope},
 		{"dm-first: I wrote first", func(h *watchHarness) { h.set("sales", "scope", "dm-first") }, cIWrote, nil, "", watch.RuleScope},
 		{"dm-first: listed does not bypass", func(h *watchHarness) {
 			h.set("sales", "scope", "dm-first")
-			h.writeState("sales", sessA, cIWrote)
+			h.setChats("sales", cIWrote)
 		}, cIWrote, nil, "", watch.RuleScope},
 		{"group not listed", nil, cUnlisted, []string{"--reply-to", "1"}, "", watch.RuleScope},
 		{"group not listed, contacts scope", func(h *watchHarness) { h.set("sales", "scope", "contacts") }, cUnlisted, []string{"--reply-to", "1"}, "", watch.RuleScope},
@@ -365,7 +395,7 @@ func TestWatchReplyOfflineRefusalsDoNotConnect(t *testing.T) {
 	h.refused(watch.RulePausedAll, h.reply(cLead, "hi")...)
 	h.env[envSession] = sessB
 	os.Remove(h.app.Paths.PauseAll())
-	h.refused(watch.RuleNotActive, h.reply(cLead, "hi")...)
+	h.refused(watch.RuleSession, h.reply(cLead, "hi")...)
 	if h.connects != 0 {
 		t.Fatalf("connected %d times for offline refusals", h.connects)
 	}
@@ -385,8 +415,8 @@ func TestWatchReplyDM(t *testing.T) {
 	if d["answers"].(float64) != 2 || sent["id"].(float64) != 3 || d["watcher"] != "sales" {
 		t.Fatalf("output %v", d)
 	}
-	logs := readLines[watch.Send](t, filepath.Join(h.dir("sales"), watch.LogFile))
-	if len(logs) != 1 || !logs[0].OK || logs[0].MsgID != 3 || logs[0].Answered != 2 || logs[0].By != sessA ||
+	logs := readLines[watch.Send](t, h.logPath("sales"))
+	if len(logs) != 1 || !logs[0].OK || logs[0].MsgID != 3 || logs[0].Answered != 2 ||
 		logs[0].ChatID != cLead || logs[0].Text != "Yes, still available." {
 		t.Fatalf("sends.log %+v", logs)
 	}
@@ -394,10 +424,16 @@ func TestWatchReplyDM(t *testing.T) {
 	if len(ledger) != 1 || ledger[0].ChatID != cLead || ledger[0].MsgID != 2 || ledger[0].SentID != 3 || ledger[0].Watcher != "sales" {
 		t.Fatalf("ledger %+v", ledger)
 	}
-	for _, p := range []string{filepath.Join(h.dir("sales"), watch.LogFile), h.app.Paths.Answered()} {
+	for _, p := range []string{h.logPath("sales"), h.app.Paths.Answered()} {
 		if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
 			t.Fatalf("%s mode %v", p, st.Mode())
 		}
+	}
+	if st, _ := os.Stat(h.app.Paths.WatcherDir("sales")); st.Mode().Perm() != 0o700 {
+		t.Fatalf("watcher data dir mode %v", st.Mode())
+	}
+	if fileExists(filepath.Join(h.dir("sales"), "sends.log")) || fileExists(filepath.Join(h.dir("sales"), watch.LogFile)) {
+		t.Fatal("the send log is in the watcher's own dir")
 	}
 	// No double reply: the latest message is now ours.
 	h.clock = h.clock.Add(time.Minute)
@@ -501,7 +537,7 @@ func TestWatchReplyDryRun(t *testing.T) {
 	if len(h.fake.Sent) != 0 || h.fake.Calls["History"] == 0 {
 		t.Fatalf("dry run sent %v / read history %d times", h.fake.Sent, h.fake.Calls["History"])
 	}
-	for _, p := range []string{filepath.Join(h.dir("sales"), watch.LogFile), h.app.Paths.Answered()} {
+	for _, p := range []string{h.logPath("sales"), h.app.Paths.Answered()} {
 		if fileExists(p) {
 			t.Fatalf("dry run wrote %s", p)
 		}
@@ -512,7 +548,7 @@ func TestWatchReplySendFailureIsLoggedNotLedgered(t *testing.T) {
 	h := newWatchHarness(t)
 	h.g.failSend = errors.New("network down")
 	h.fail(output.ExitInternal, output.CodeInternal, h.reply(cLead, "Yes.")...)
-	logs := readLines[watch.Send](t, filepath.Join(h.dir("sales"), watch.LogFile))
+	logs := readLines[watch.Send](t, h.logPath("sales"))
 	if len(logs) != 1 || logs[0].OK || !strings.Contains(logs[0].Err, "network down") {
 		t.Fatalf("sends.log %+v", logs)
 	}
@@ -631,7 +667,7 @@ func (h *watchHarness) cloneApp(session string) *App {
 func TestWatchList(t *testing.T) {
 	h := newWatchHarness(t)
 	h.addWatcher("other", sessB, map[string]any{"scope": "bogus"})
-	h.write(filepath.Join(h.dir("other"), watch.PauseFile), "")
+	h.write(filepath.Join(h.app.Paths.WatcherDir("other"), watch.PauseFile), "")
 	h.ok(h.reply(cLead, "Yes.")...)
 	d := h.ok("watch", "list")
 	rows := list(d["watchers"])
@@ -644,7 +680,7 @@ func TestWatchList(t *testing.T) {
 		t.Fatalf("other %v", other)
 	}
 	if sales["valid"] != true || sales["sends_last_hour"].(float64) != 1 || sales["listed_chats"].(float64) != 3 ||
-		sales["caller_is_active"] != true || sales["last_send"] == nil || sales["active_watcher"] != sessA ||
+		sales["caller_matches"] != true || sales["session_bound"] != true || sales["last_send"] == nil ||
 		sales["max_chars"].(float64) != watch.DefaultMaxChars || sales["mentions_only"] != true {
 		t.Fatalf("sales %v", sales)
 	}
@@ -670,7 +706,8 @@ func TestWatchCheck(t *testing.T) {
 	}
 	h.set("sales", "approved", "")
 	h.set("sales", "per_chat_seconds", -1)
-	h.write(filepath.Join(h.dir("sales"), watch.StateFile), `{"active_watcher":"x","chats":{"abc":"n"}}`)
+	h.set("sales", "chats", map[string]string{"abc": "n"})
+	h.set("sales", "session", "rebound")
 	d = h.ok("watch", "check", "--watcher", "sales")
 	w := d["watcher"].(map[string]any)
 	if d["valid"] != false || len(w["problems"].([]any)) != 2 || len(d["warnings"].([]any)) != 2 {
@@ -691,5 +728,97 @@ func TestWatchHelpDocumentsRegistry(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("watch --help lacks %q", want)
 		}
+	}
+}
+
+// A change to the registry while a reply is being checked stops the send.
+func TestWatchReplyRechecksBeforeSend(t *testing.T) {
+	cases := []struct {
+		name   string
+		chat   int64
+		extra  []string
+		change func(h *watchHarness)
+		rule   string
+	}{
+		{"revoked", cLead, nil, func(h *watchHarness) { delete(h.reg, "sales"); h.writeRegistry() }, watch.RuleNotRegistered},
+		{"rebound", cLead, nil, func(h *watchHarness) { h.set("sales", "session", sessB) }, watch.RuleSession},
+		{"chat delisted", cLead, nil, func(h *watchHarness) { h.setChats("sales", cGroup) }, watch.RuleScope},
+		{"groups off", cGroup, []string{"--reply-to", "2"}, func(h *watchHarness) { h.set("sales", "groups", false) }, watch.RuleChatType},
+		{"max_chars lowered", cLead, nil, func(h *watchHarness) { h.set("sales", "max_chars", 3) }, watch.RuleTextLength},
+		{"paused", cLead, nil, func(h *watchHarness) {
+			h.write(filepath.Join(h.app.Paths.WatcherDir("sales"), watch.PauseFile), "")
+		}, watch.RulePaused},
+		{"pause all", cLead, nil, func(h *watchHarness) { h.write(h.app.Paths.PauseAll(), "") }, watch.RulePausedAll},
+		{"per_hour lowered", cLead, nil, func(h *watchHarness) {
+			h.appendLine(h.logPath("sales"), h.send(-time.Minute, cMutual))
+			h.set("sales", "per_hour", 1)
+		}, watch.RuleRateWatcher},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newWatchHarness(t)
+			h.g.onHistory = func() { c.change(h) }
+			h.refused(c.rule, h.reply(c.chat, "Yes, still here.", c.extra...)...)
+		})
+	}
+}
+
+// A registry change made while a reply waits for the watch lock stops it.
+func TestWatchReplyReloadsAfterLock(t *testing.T) {
+	h := newWatchHarness(t)
+	held := h.app.Paths.NewWatchLock()
+	if err := h.app.Paths.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := held.Acquire(context.Background(), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	out := &bytes.Buffer{}
+	app := *h.app
+	app.Stdout = out
+	done := make(chan int)
+	go func() { done <- app.Execute(context.Background(), h.reply(cLead, "Yes.")) }()
+	time.Sleep(400 * time.Millisecond) // the reply is now waiting for the lock
+	h.set("sales", "session", sessB)
+	held.Release()
+	if code := <-done; code != output.ExitWatcher || !strings.Contains(out.String(), watch.RuleSession) {
+		t.Fatalf("exit %d: %s", code, out.String())
+	}
+	if len(h.fake.Sent) != 0 || h.connects != 0 {
+		t.Fatalf("sent %v, connected %d", h.fake.Sent, h.connects)
+	}
+}
+
+// The bound session id never appears in any output.
+func TestWatchNeverPrintsSession(t *testing.T) {
+	h := newWatchHarness(t)
+	var outputs []string
+	capture := func(args ...string) {
+		h.out.Reset()
+		h.app.Execute(context.Background(), args)
+		outputs = append(outputs, h.out.String())
+	}
+	h.env[envSession] = sessB
+	capture(h.reply(cLead, "Yes.")...)
+	capture(h.reply(cLead, "Yes.", "--dry-run")...)
+	delete(h.env, envSession)
+	capture(h.reply(cLead, "Yes.")...)
+	h.env[envSession] = sessA
+	capture(h.reply(cLead, "Yes.")...)
+	capture("watch", "list")
+	capture("watch", "check", "--watcher", "sales")
+	for _, o := range outputs {
+		if strings.Contains(o, sessA) || strings.Contains(o, sessB) {
+			t.Fatalf("output shows a session id: %s", o)
+		}
+	}
+	for _, path := range []string{h.logPath("sales"), h.app.Paths.Answered()} {
+		b, _ := os.ReadFile(path)
+		if strings.Contains(string(b), sessA) {
+			t.Fatalf("%s stores the session id", path)
+		}
+	}
+	if !strings.Contains(outputs[0], "session binding") {
+		t.Fatalf("mismatch refusal: %s", outputs[0])
 	}
 }

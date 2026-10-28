@@ -3,6 +3,7 @@ package watch
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -18,8 +19,7 @@ const (
 	RuleNotRegistered   = "not_registered"
 	RuleInvalid         = "invalid_registration"
 	RulePaused          = "paused"
-	RuleState           = "state"
-	RuleNotActive       = "not_active_watcher"
+	RuleSession         = "session_mismatch"
 	RuleTextLength      = "text_length"
 	RuleRateWatcher     = "rate_watcher"
 	RuleRateGlobal      = "rate_global"
@@ -49,69 +49,75 @@ func Refuse(rule, format string, a ...any) *output.Error {
 	return output.WatcherRefused(format, a...).WithDetail("rule", rule)
 }
 
-// Gate runs the checks for one watcher's send.
+// Gate runs the checks for one watcher's send. Everything it trusts comes from
+// the user-owned registry and the data dir, re-read by Reload.
 type Gate struct {
 	Paths         config.Paths
+	Name          string
+	Caller        string // the caller's session id; never printed
 	Registry      *Registry
 	W             *Watcher
 	GlobalPerHour int
 	Now           func() time.Time
 }
 
-// Open checks PAUSE-ALL and the registration, in that order.
-func Open(p config.Paths, name string, globalPerHour int, now func() time.Time) (*Gate, error) {
-	if exists(p.PauseAll()) {
-		return nil, Refuse(RulePausedAll, "PAUSE-ALL is present in the data dir: every watcher is paused")
+// Open loads the watcher and checks pauses, registration and the session binding.
+func Open(p config.Paths, name, caller string, globalPerHour int, now func() time.Time) (*Gate, error) {
+	g := &Gate{Paths: p, Name: name, Caller: caller, GlobalPerHour: globalPerHour, Now: now}
+	if err := g.Reload(); err != nil {
+		return nil, err
 	}
-	reg, err := LoadRegistry(p.Watchers())
-	if err != nil {
-		return nil, Refuse(RuleInvalid, "%v", err)
-	}
-	if !reg.Has(name) {
-		return nil, Refuse(RuleNotRegistered, "watcher %q is not registered in watchers.json (the user registers watchers)", name)
-	}
-	w, problems := reg.Watcher(name)
-	if len(problems) > 0 {
-		return nil, Refuse(RuleInvalid, "watcher %q registration is invalid: %s", name, strings.Join(problems, "; "))
-	}
-	return &Gate{Paths: p, Registry: reg, W: w, GlobalPerHour: globalPerHour, Now: now}, nil
+	return g, nil
 }
 
-// Paused refuses when PAUSE-ALL or the watcher's PAUSE exists.
-func (g *Gate) Paused() error {
+// Reload re-reads watchers.json and re-checks, in order: PAUSE-ALL, registration,
+// a valid entry, the watcher's PAUSE files, and the caller's session binding.
+func (g *Gate) Reload() error {
 	if exists(g.Paths.PauseAll()) {
 		return Refuse(RulePausedAll, "PAUSE-ALL is present in the data dir: every watcher is paused")
 	}
-	if exists(g.W.PausePath()) {
-		return Refuse(RulePaused, "PAUSE file in %s: watcher %q is paused", g.W.Dir, g.W.Name)
+	reg, err := LoadRegistry(g.Paths)
+	if err != nil {
+		return Refuse(RuleInvalid, "%v", err)
+	}
+	if !reg.Has(g.Name) {
+		return Refuse(RuleNotRegistered, "watcher %q is not registered in watchers.json (the user registers watchers)", g.Name)
+	}
+	w, problems := reg.Watcher(g.Name)
+	if len(problems) > 0 {
+		return Refuse(RuleInvalid, "watcher %q registration is invalid: %s", g.Name, strings.Join(problems, "; "))
+	}
+	for _, p := range w.PausePaths() {
+		if exists(p) {
+			return Refuse(RulePaused, "a PAUSE file pauses watcher %q", g.Name)
+		}
+	}
+	if g.Caller == "" || g.Caller != w.Session {
+		return Refuse(RuleSession, "caller does not match the watcher's session binding")
+	}
+	g.Registry, g.W = reg, w
+	return nil
+}
+
+// TextLength checks the reply length against the current entry.
+func (g *Gate) TextLength(text string) error {
+	if n := utf8.RuneCountInString(text); n < 1 || n > g.W.MaxChars {
+		return Refuse(RuleTextLength, "text length %d not in 1..%d", n, g.W.MaxChars)
 	}
 	return nil
 }
 
-// Offline runs the checks that need neither the chat nor the logs.
-// It returns the watcher state for the scope check.
-func (g *Gate) Offline(caller, text string) (*State, error) {
-	if err := g.Paused(); err != nil {
-		return nil, err
+// Recheck runs right before the send: the registry is re-read and the entry,
+// binding, text length, chat type and scope must still allow this reply.
+func (g *Gate) Recheck(ctx context.Context, t tgclient.Telegram, p *tgclient.Peer, self *tgclient.User, text string) error {
+	if err := g.Reload(); err != nil {
+		return err
 	}
-	st, err := LoadState(g.W.StatePath())
-	if err != nil {
-		return nil, Refuse(RuleState, "cannot read %s: %v", g.W.StatePath(), err)
+	if err := g.TextLength(text); err != nil {
+		return err
 	}
-	if st.ActiveWatcher == "" {
-		return nil, Refuse(RuleNotActive, "state.json has no active_watcher")
-	}
-	if caller == "" || caller != st.ActiveWatcher {
-		shown := caller
-		if shown == "" {
-			shown = "(unset)"
-		}
-		return nil, Refuse(RuleNotActive, "caller %s is not the active watcher %s", shown, st.ActiveWatcher)
-	}
-	if n := utf8.RuneCountInString(text); n < 1 || n > g.W.MaxChars {
-		return nil, Refuse(RuleTextLength, "text length %d not in 1..%d", n, g.W.MaxChars)
-	}
-	return st, nil
+	_, err := g.chatAllowed(ctx, t, p, self)
+	return err
 }
 
 // Ledger is answered.jsonl, read once per send.
@@ -157,28 +163,27 @@ func (g *Gate) Limits(chat int64, l *Ledger) error {
 	if err != nil {
 		return err
 	}
-	if n := countSince(own, hourAgo); n >= g.W.PerHour {
+	ownLedger, ledger := 0, 0
+	for _, a := range l.Answers {
+		if a.Time().After(hourAgo) {
+			ledger++
+			if a.Watcher == g.W.Name {
+				ownLedger++
+			}
+		}
+	}
+	if n := max(countSince(own, hourAgo), ownLedger); n >= g.W.PerHour {
 		return Refuse(RuleRateWatcher, "watcher %q sent %d in the last hour (limit %d)", g.W.Name, n, g.W.PerHour)
 	}
-	// Global: across every registered watcher's log, or the ledger if that is larger
-	// (it also covers watchers since removed from the registry).
+	// Global: every watcher log in the data dir (registered or not), or the ledger if larger.
 	global := 0
-	for _, name := range g.Registry.Names() {
-		w, _ := g.Registry.Watcher(name)
-		if w == nil || w.Dir == "" {
-			continue
-		}
-		sends, _, err := ReadJSONL[Send](w.LogPath())
+	logs, _ := filepath.Glob(filepath.Join(g.Paths.WatchersDir(), "*", LogFile))
+	for _, path := range logs {
+		sends, _, err := ReadJSONL[Send](path)
 		if err != nil {
 			continue
 		}
 		global += countSince(sends, hourAgo)
-	}
-	ledger := 0
-	for _, a := range l.Answers {
-		if a.Time().After(hourAgo) {
-			ledger++
-		}
 	}
 	if n := max(global, ledger); n >= g.GlobalPerHour {
 		return Refuse(RuleRateGlobal, "all watchers sent %d in the last hour (global_per_hour %d)", n, g.GlobalPerHour)
@@ -224,25 +229,13 @@ type Plan struct {
 
 // CheckChat runs the chat-type, scope and conversation rules against the live chat.
 func (g *Gate) CheckChat(ctx context.Context, t tgclient.Telegram, p *tgclient.Peer, self *tgclient.User,
-	st *State, l *Ledger, replyTo int, text string) (*Plan, error) {
-	plan := &Plan{Chat: p.Ref(), ReplyTo: replyTo, Text: text, Watcher: g.W.Name}
-	switch {
-	case self != nil && p.ID == self.ID:
-		return nil, Refuse(RuleChatType, "chat %d is Saved Messages", p.ID)
-	case p.Type == "user":
-	case p.IsGroup():
-		if !g.W.Groups {
-			return nil, Refuse(RuleChatType, "chat %d is a %s and watcher %q is 1:1 only (groups: false)", p.ID, p.Type, g.W.Name)
-		}
-		plan.Group = true
-	default:
-		return nil, Refuse(RuleChatType, "chat %d is a %s: watchers answer people in 1:1 chats or groups", p.ID, p.Type)
-	}
-	if err := g.checkScope(ctx, t, p, st, plan.Group); err != nil {
+	l *Ledger, replyTo int, text string) (*Plan, error) {
+	group, err := g.chatAllowed(ctx, t, p, self)
+	if err != nil {
 		return nil, err
 	}
-	var err error
-	if plan.Group {
+	plan := &Plan{Chat: p.Ref(), ReplyTo: replyTo, Text: text, Watcher: g.W.Name, Group: group}
+	if group {
 		err = g.checkGroup(ctx, t, p, l, plan)
 	} else {
 		err = g.checkDM(ctx, t, p, l, plan)
@@ -253,18 +246,35 @@ func (g *Gate) CheckChat(ctx context.Context, t tgclient.Telegram, p *tgclient.P
 	return plan, nil
 }
 
-func (g *Gate) checkScope(ctx context.Context, t tgclient.Telegram, p *tgclient.Peer, st *State, group bool) error {
-	_, listed := st.Chats[p.ID]
+// chatAllowed applies the chat-type and scope rules; group reports a group chat.
+func (g *Gate) chatAllowed(ctx context.Context, t tgclient.Telegram, p *tgclient.Peer, self *tgclient.User) (group bool, err error) {
+	switch {
+	case self != nil && p.ID == self.ID:
+		return false, Refuse(RuleChatType, "chat %d is Saved Messages", p.ID)
+	case p.Type == "user":
+	case p.IsGroup():
+		if !g.W.Groups {
+			return false, Refuse(RuleChatType, "chat %d is a %s and watcher %q is 1:1 only (groups: false)", p.ID, p.Type, g.W.Name)
+		}
+		group = true
+	default:
+		return false, Refuse(RuleChatType, "chat %d is a %s: watchers answer people in 1:1 chats or groups", p.ID, p.Type)
+	}
+	return group, g.checkScope(ctx, t, p, group)
+}
+
+func (g *Gate) checkScope(ctx context.Context, t tgclient.Telegram, p *tgclient.Peer, group bool) error {
+	listed := g.W.Listed(p.ID)
 	if group {
 		if !listed {
-			return Refuse(RuleScope, "group %d is not in state.json chats (groups must be listed)", p.ID)
+			return Refuse(RuleScope, "group %d is not in the watcher's registry chats (groups must be listed)", p.ID)
 		}
 		return nil
 	}
 	switch g.W.Scope {
 	case ScopeListed:
 		if !listed {
-			return Refuse(RuleScope, "chat %d is not in state.json chats (scope listed)", p.ID)
+			return Refuse(RuleScope, "chat %d is not in the watcher's registry chats (scope listed)", p.ID)
 		}
 	case ScopeContacts:
 		if listed {
@@ -275,7 +285,7 @@ func (g *Gate) checkScope(ctx context.Context, t tgclient.Telegram, p *tgclient.
 			return err
 		}
 		if info.MutualContact == nil || !*info.MutualContact {
-			return Refuse(RuleScope, "chat %d is neither a mutual contact nor in state.json chats (scope contacts)", p.ID)
+			return Refuse(RuleScope, "chat %d is neither a mutual contact nor in the watcher's registry chats (scope contacts)", p.ID)
 		}
 	case ScopeDMFirst:
 		first, err := t.History(ctx, p, tgclient.HistoryQuery{Limit: firstMessages, Reverse: true})
@@ -461,11 +471,11 @@ func AddressedToMe(ctx context.Context, t tgclient.Telegram, p *tgclient.Peer, k
 	return parent != nil && parent.FromMe, nil
 }
 
-// Record appends the attempt to sends.log and, on success, the answer to the ledger.
+// Record appends the attempt to the data-dir send log and, on success, the answer to the ledger.
 // Callers hold the watch lock.
-func (g *Gate) Record(caller string, plan *Plan, sent *tgclient.Message, sendErr error) error {
+func (g *Gate) Record(plan *Plan, sent *tgclient.Message, sendErr error) error {
 	ts, at := stamp(g.Now())
-	s := Send{T: ts, At: at, Watcher: g.W.Name, By: caller, ChatID: plan.Chat.ID, ReplyTo: plan.ReplyTo,
+	s := Send{T: ts, At: at, Watcher: g.W.Name, ChatID: plan.Chat.ID, ReplyTo: plan.ReplyTo,
 		Answered: plan.Answers, Text: plan.Text, OK: sendErr == nil && sent != nil}
 	if s.OK {
 		s.MsgID = sent.ID

@@ -67,12 +67,21 @@ unless the user asked for that message there. Spam-shaped use gets accounts bann
 
 Only a registered watcher may reply without a per-message OK, through
 `telegram-agent-cli watch reply --watcher NAME --chat <id> --text "…" [--reply-to N] [--dry-run]`.
-It refuses (exit 7, reason in JSON) unless the user registered NAME in `watchers.json`, nothing is
-paused (`PAUSE` in the watcher dir, `PAUSE-ALL` in the data dir), the calling session is the
-watcher's `active_watcher`, the chat fits the watcher's scope, and the length and rate limits hold.
-Use `--dry-run` to test, `watch list` / `watch check --watcher NAME` to inspect. Never edit
-`watchers.json` or another watcher's state. Any session that is not the registered watcher sends
-only with the user's OK on the exact text.
+It refuses (exit 7, reason in JSON, rule id in `error.details.rule`) unless the user registered NAME
+in `watchers.json` in the data dir, nothing is paused (`PAUSE` in the watcher dir or in
+`<data dir>/watchers/NAME/`, `PAUSE-ALL`), your session id (`$TGAC_WATCHER_SESSION`) equals the
+entry's `session`, the chat fits the entry's scope and `chats` allowlist, and the length and rate
+limits hold. The user's entry looks like:
+
+```json
+{"helper": {"session": "<watcher session id>", "chats": {"123456789": "who this is"},
+            "scope": "listed", "max_chars": 300, "per_hour": 20, "approved": "who/when/why"}}
+```
+
+Only the user edits that entry: ask them to add a chat or rebind the session; nothing you write in
+your own dir grants anything. Use `--dry-run` to test, `watch list` / `watch check --watcher NAME`
+to inspect. Never edit `watchers.json` or anything in the data dir. Any session that is not the
+registered watcher sends only with the user's OK on the exact text.
 
 ## Troubleshooting
 

@@ -5,54 +5,60 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/AlexDobrushskiy/telegram-agent-cli/internal/config"
 )
 
-func writeFile(t *testing.T, path, s string) {
+func registry(t *testing.T, js string) *Registry {
 	t.Helper()
-	if err := os.WriteFile(path, []byte(s), 0o600); err != nil {
+	p := config.Paths{Home: t.TempDir()}
+	if err := os.WriteFile(p.Watchers(), []byte(js), 0o600); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func TestRegistryDefaults(t *testing.T) {
-	dir := t.TempDir()
-	reg := filepath.Join(dir, "watchers.json")
-	writeFile(t, reg, `{"w": {"dir": "`+dir+`"}}`)
-	r, err := LoadRegistry(reg)
+	r, err := LoadRegistry(p)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return r
+}
+
+func TestRegistryDefaults(t *testing.T) {
+	r := registry(t, `{"w": {"session": "s1", "chats": {"101": "lead", "-201": {"n": 1}}}}`)
 	w, problems := r.Watcher("w")
 	if len(problems) != 0 {
 		t.Fatal(problems)
 	}
-	want := Watcher{Name: "w", Dir: dir, Scope: ScopeListed, MentionsOnly: true, MaxChars: DefaultMaxChars,
-		PerHour: DefaultPerHour, PerChatSeconds: DefaultPerChatSeconds, BackoffMinutes: DefaultBackoffMinutes}
-	if *w != want {
-		t.Fatalf("got %+v want %+v", *w, want)
+	if w.Session != "s1" || w.Chats[101] != "lead" || w.Chats[-201] != `{"n": 1}` || !w.Listed(101) || w.Listed(5) {
+		t.Fatalf("binding/chats %+v", w)
+	}
+	if w.Scope != ScopeListed || !w.MentionsOnly || w.Groups || w.MaxChars != DefaultMaxChars || w.PerHour != DefaultPerHour ||
+		w.PerChatSeconds != DefaultPerChatSeconds || w.BackoffMinutes != DefaultBackoffMinutes || w.Dir != "" {
+		t.Fatalf("defaults %+v", w)
+	}
+	if w.LogPath() != filepath.Join(filepath.Dir(r.Path), "watchers", "w", LogFile) || len(w.PausePaths()) != 1 {
+		t.Fatalf("paths %s %v", w.LogPath(), w.PausePaths())
 	}
 }
 
 func TestRegistryProblems(t *testing.T) {
 	dir := t.TempDir()
-	reg := filepath.Join(dir, "watchers.json")
-	writeFile(t, reg, `{"bad": {"dir": "rel", "scope": "x", "max_chars": 0, "extra": 1},
-		"ok": {"dir": "`+dir+`", "scope": "dm-first", "groups": true, "mentions_only": false}}`)
-	r, err := LoadRegistry(reg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, p := r.Watcher("bad"); len(p) != 4 {
+	r := registry(t, `{"bad": {"dir": "rel", "scope": "x", "max_chars": 0, "extra": 1, "chats": {"abc": ""}},
+		"ok": {"session": "s", "dir": "`+dir+`", "scope": "dm-first", "groups": true, "mentions_only": false},
+		"../evil": {"session": "s"}}`)
+	if _, p := r.Watcher("bad"); len(p) != 6 { // dir, scope, max_chars, unknown field, chats key, session
 		t.Fatalf("problems %v", p)
 	}
 	w, p := r.Watcher("ok")
-	if len(p) != 0 || !w.Groups || w.MentionsOnly || w.Scope != ScopeDMFirst {
+	if len(p) != 0 || !w.Groups || w.MentionsOnly || w.Scope != ScopeDMFirst || len(w.PausePaths()) != 2 {
 		t.Fatalf("ok = %+v %v", w, p)
+	}
+	if w, p := r.Watcher("../evil"); len(p) != 1 || w.LogPath() != "" {
+		t.Fatalf("unsafe name: %v %q", p, w.LogPath())
 	}
 	if _, p := r.Watcher("missing"); len(p) != 1 {
 		t.Fatal("missing watcher has no problem")
 	}
-	if got := strings.Join(r.Names(), ","); got != "bad,ok" {
+	if got := strings.Join(r.Names(), ","); got != "../evil,bad,ok" {
 		t.Fatalf("names %s", got)
 	}
 }
@@ -66,18 +72,8 @@ func TestExpandHome(t *testing.T) {
 	}
 }
 
-func TestStateAndJSONL(t *testing.T) {
-	dir := t.TempDir()
-	sp := filepath.Join(dir, StateFile)
-	writeFile(t, sp, `{"active_watcher": " s1 ", "chats": {"101": "lead", "-201": {"n": 1}, "abc": "x"}, "cursor": 5}`)
-	st, err := LoadState(sp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.ActiveWatcher != "s1" || st.Chats[101] != "lead" || st.Chats[-201] != `{"n": 1}` || len(st.BadChats) != 1 {
-		t.Fatalf("state %+v", st)
-	}
-	lp := filepath.Join(dir, LogFile)
+func TestJSONL(t *testing.T) {
+	lp := filepath.Join(t.TempDir(), "sub", LogFile)
 	if err := AppendJSONL(lp, Send{T: 1, ChatID: 1, OK: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +87,10 @@ func TestStateAndJSONL(t *testing.T) {
 	if err != nil || bad != 1 || len(sends) != 2 || sends[1].ChatID != 2 {
 		t.Fatalf("%v %d %v", sends, bad, err)
 	}
-	if s, bad, err := ReadJSONL[Send](filepath.Join(dir, "none")); s != nil || bad != 0 || err != nil {
+	if st, _ := os.Stat(filepath.Dir(lp)); st.Mode().Perm() != 0o700 {
+		t.Fatalf("dir mode %v", st.Mode())
+	}
+	if s, bad, err := ReadJSONL[Send](filepath.Join(t.TempDir(), "none")); s != nil || bad != 0 || err != nil {
 		t.Fatal("missing file is not empty")
 	}
 }

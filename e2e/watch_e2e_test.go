@@ -59,14 +59,25 @@ func sendsLastDay(t *testing.T, name string) int {
 	return -1
 }
 
-// TestWatchReplyDryRun needs a registered watcher: TGAC_E2E_WATCHER (name),
-// TGAC_E2E_WATCHER_CHAT (chat id), optional TGAC_E2E_REPLY_TO; the caller's
-// session env must match the watcher's active_watcher for a full pass.
+// TestWatchReplyDryRun needs a watcher in the registry: TGAC_E2E_WATCHER (name),
+// TGAC_E2E_WATCHER_CHAT (chat id), optional TGAC_E2E_REPLY_TO. For a full pass the
+// session env must match the entry's session binding.
 func TestWatchReplyDryRun(t *testing.T) {
 	ok(t, nil, "watch", "list")
 	name, chat := os.Getenv("TGAC_E2E_WATCHER"), os.Getenv("TGAC_E2E_WATCHER_CHAT")
 	if name == "" || chat == "" {
 		t.Skip("set TGAC_E2E_WATCHER and TGAC_E2E_WATCHER_CHAT to dry-run a reply")
+	}
+	var check struct {
+		Valid   bool `json:"valid"`
+		Watcher struct {
+			SessionBound  bool `json:"session_bound"`
+			CallerMatches bool `json:"caller_matches"`
+		} `json:"watcher"`
+	}
+	ok(t, &check, "watch", "check", "--watcher", name)
+	if !check.Valid || !check.Watcher.SessionBound {
+		t.Fatalf("registry entry %q is not valid: %+v", name, check)
 	}
 	before := sendsLastDay(t, name)
 	args := []string{"watch", "reply", "--watcher", name, "--chat", chat, "--text", "e2e dry run", "--dry-run"}
@@ -75,6 +86,8 @@ func TestWatchReplyDryRun(t *testing.T) {
 	}
 	code, env := run(t, args...)
 	switch {
+	case code == 0 && !check.Watcher.CallerMatches:
+		t.Fatalf("dry run passed although the caller does not match the session binding")
 	case code == 0:
 		t.Logf("would send: %s", env.Data)
 	case code == 7 && env.Error.Code == "watcher_refused":

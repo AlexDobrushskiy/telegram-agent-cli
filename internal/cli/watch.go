@@ -55,11 +55,12 @@ func (a *App) watchReplyCmd() *cobra.Command {
 			"lets exactly this one messages.sendMessage through. Refusals exit 7 with error.code\n" +
 			"watcher_refused, the reason in error.message and a stable id in error.details.rule.\n" +
 			"Rules, in order: no PAUSE-ALL; registered and valid; no PAUSE; caller ($<watcher_session_env>)\n" +
-			"is state.json active_watcher; text 1..max_chars; per-watcher, global and per-chat limits;\n" +
-			"chat is a 1:1 with a person, or a group with groups:true and listed in state.json; scope;\n" +
+			"equals the entry's session; text 1..max_chars; per-watcher, global and per-chat limits;\n" +
+			"chat is a 1:1 with a person, or a group with groups:true listed in the entry's chats; scope;\n" +
 			"1:1: latest message is theirs, not already answered, the owner has not written within backoff;\n" +
 			"group: --reply-to required, target not the owner's, not answered by a watcher or the owner,\n" +
 			"mentions/replies to the owner if mentions_only, the owner has not written within backoff.\n" +
+			"The registry is re-read after taking the watch lock and again right before sending.\n" +
 			"--dry-run runs every check (reading the chat) and sends nothing.",
 		Args: noArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
@@ -91,13 +92,11 @@ func (a *App) watchReply(ctx context.Context, name string, chatID int64, text st
 	if err != nil {
 		return err
 	}
-	g, err := watch.Open(a.Paths, name, cfg.GlobalPerHour, a.now)
+	g, err := watch.Open(a.Paths, name, a.getenv(cfg.WatcherSessionEnv), cfg.GlobalPerHour, a.now)
 	if err != nil {
 		return err
 	}
-	caller := a.getenv(cfg.WatcherSessionEnv)
-	st, err := g.Offline(caller, text)
-	if err != nil {
+	if err := g.TextLength(text); err != nil {
 		return err
 	}
 	if err := a.Paths.Ensure(); err != nil {
@@ -110,6 +109,13 @@ func (a *App) watchReply(ctx context.Context, name string, chatID int64, text st
 			return err
 		}
 		defer lock.Release()
+	}
+	// The registry may have changed while this call waited for the lock.
+	if err := g.Reload(); err != nil {
+		return err
+	}
+	if err := g.TextLength(text); err != nil {
+		return err
 	}
 	ledger, err := g.LoadLedger()
 	if err != nil {
@@ -131,7 +137,7 @@ func (a *App) watchReply(ctx context.Context, name string, chatID int64, text st
 		if p.ID != chatID {
 			return watch.Refuse(watch.RuleChatType, "chat %d resolved to a different chat %d", chatID, p.ID)
 		}
-		plan, err := g.CheckChat(ctx, t, p, self, st, ledger, replyTo, text)
+		plan, err := g.CheckChat(ctx, t, p, self, ledger, replyTo, text)
 		if err != nil {
 			return err
 		}
@@ -139,11 +145,15 @@ func (a *App) watchReply(ctx context.Context, name string, chatID int64, text st
 			result = map[string]any{"dry_run": true, "would_send": plan}
 			return nil
 		}
-		if err := g.Paused(); err != nil {
+		// Last look: a revocation, pause or binding change made meanwhile stops the send.
+		if err := g.Recheck(ctx, t, p, self, text); err != nil {
+			return err
+		}
+		if err := g.Limits(chatID, ledger); err != nil {
 			return err
 		}
 		sent, sendErr := t.SendText(guard.AllowOnce(ctx, guard.MethodSendMessage), p, text, plan.ReplyTo)
-		if err := g.Record(caller, plan, sent, sendErr); err != nil {
+		if err := g.Record(plan, sent, sendErr); err != nil {
 			if sendErr == nil && sent != nil {
 				return output.Internal("sent message %d but could not log it: %v", sent.ID, err)
 			}
@@ -161,44 +171,35 @@ func (a *App) watchReply(ctx context.Context, name string, chatID int64, text st
 	return a.emit(result)
 }
 
-// watcherSummary is one `watch list` row.
+// watcherSummary is one `watch list` row. The session id itself is never shown.
 type watcherSummary struct {
 	*watch.Watcher
-	Valid          bool     `json:"valid"`
-	Problems       []string `json:"problems,omitempty"`
-	Paused         bool     `json:"paused"`
-	ActiveWatcher  *string  `json:"active_watcher"`
-	ListedChats    int      `json:"listed_chats"`
-	SendsLastHour  int      `json:"sends_last_hour"`
-	SendsLastDay   int      `json:"sends_last_day"`
-	FailedLastDay  int      `json:"failed_last_day"`
-	LastSend       *string  `json:"last_send"`
-	BadLogLines    int      `json:"bad_log_lines,omitempty"`
-	CallerIsActive bool     `json:"caller_is_active"`
+	Valid         bool     `json:"valid"`
+	Problems      []string `json:"problems,omitempty"`
+	Paused        bool     `json:"paused"`
+	SessionBound  bool     `json:"session_bound"`
+	CallerMatches bool     `json:"caller_matches"`
+	ListedChats   int      `json:"listed_chats"`
+	SendsLastHour int      `json:"sends_last_hour"`
+	SendsLastDay  int      `json:"sends_last_day"`
+	FailedLastDay int      `json:"failed_last_day"`
+	LastSend      *string  `json:"last_send"`
+	BadLogLines   int      `json:"bad_log_lines,omitempty"`
 }
 
 func (a *App) summarize(reg *watch.Registry, name, caller string) watcherSummary {
 	w, problems := reg.Watcher(name)
 	s := watcherSummary{Watcher: w, Problems: problems}
-	if w.Dir != "" {
-		s.Paused = fileExists(w.PausePath())
-		if st, err := watch.LoadState(w.StatePath()); err != nil {
-			s.Problems = append(s.Problems, "state.json: "+err.Error())
-		} else {
-			if st.ActiveWatcher != "" {
-				s.ActiveWatcher = &st.ActiveWatcher
-			} else {
-				s.Problems = append(s.Problems, "state.json has no active_watcher")
-			}
-			s.ListedChats = len(st.Chats)
-			s.CallerIsActive = caller != "" && caller == st.ActiveWatcher
-			for _, k := range st.BadChats {
-				s.Problems = append(s.Problems, "state.json chats key is not a chat id: "+k)
-			}
-		}
+	s.SessionBound = w.Session != ""
+	s.CallerMatches = caller != "" && caller == w.Session
+	s.ListedChats = len(w.Chats)
+	for _, p := range w.PausePaths() {
+		s.Paused = s.Paused || fileExists(p)
+	}
+	if w.LogPath() != "" {
 		sends, bad, err := watch.ReadJSONL[watch.Send](w.LogPath())
 		if err != nil {
-			s.Problems = append(s.Problems, "sends.log: "+err.Error())
+			s.Problems = append(s.Problems, "send log: "+err.Error())
 		}
 		s.BadLogLines = bad
 		now := a.now()
@@ -236,7 +237,7 @@ func (a *App) watchListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			reg, err := watch.LoadRegistry(a.Paths.Watchers())
+			reg, err := watch.LoadRegistry(a.Paths)
 			if err != nil {
 				return err
 			}
@@ -272,7 +273,7 @@ func (a *App) watchCheckCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			reg, err := watch.LoadRegistry(a.Paths.Watchers())
+			reg, err := watch.LoadRegistry(a.Paths)
 			if err != nil {
 				return err
 			}
@@ -285,25 +286,19 @@ func (a *App) watchCheckCmd() *cobra.Command {
 			if s.Approved == "" {
 				warnings = append(warnings, "approved is empty: record who approved this watcher and for what")
 			}
-			if caller == "" {
-				warnings = append(warnings, "$"+cfg.WatcherSessionEnv+" is unset in this shell: replies from here would be refused")
-			} else if !s.CallerIsActive {
-				warnings = append(warnings, "this shell's $"+cfg.WatcherSessionEnv+" is not the active watcher")
+			if s.SessionBound && !s.CallerMatches {
+				warnings = append(warnings, "this shell's $"+cfg.WatcherSessionEnv+" does not match the session binding: replies from here would be refused")
 			}
-			var chats []int64
-			if s.Dir != "" {
-				if st, err := watch.LoadState(s.StatePath()); err == nil {
-					for id := range st.Chats {
-						chats = append(chats, id)
-					}
-				}
+			chats := make([]int64, 0, len(s.Chats))
+			for id := range s.Chats {
+				chats = append(chats, id)
 			}
 			slices.Sort(chats)
 			return a.emit(map[string]any{
 				"watcher":   s,
 				"valid":     s.Valid,
 				"pause_all": fileExists(a.Paths.PauseAll()),
-				"chats":     nonNilIDs(chats),
+				"chats":     chats,
 				"warnings":  nonNilStrings(warnings),
 			})
 		},
@@ -311,13 +306,6 @@ func (a *App) watchCheckCmd() *cobra.Command {
 	c.Flags().StringVar(&name, "watcher", "", "registered watcher name")
 	_ = c.MarkFlagRequired("watcher")
 	return c
-}
-
-func nonNilIDs(v []int64) []int64 {
-	if v == nil {
-		return []int64{}
-	}
-	return v
 }
 
 func nonNilStrings(v []string) []string {
