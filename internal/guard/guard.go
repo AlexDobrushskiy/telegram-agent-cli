@@ -1,44 +1,63 @@
-// Package guard refuses non-read MTProto requests before they leave the process.
+// Package guard refuses every MTProto request that is not on an exact read
+// allowlist before it leaves the process.
 //
 // The method name is the TL schema name from the gotd type (TypeName(), e.g.
 // "messages.getHistory"). Wrapper requests (invokeWithLayer, initConnection,
-// invokeWithoutUpdates) are checked by their inner query.
+// invokeWithoutUpdates) are checked by their inner query. The allowlist is the
+// set of reads the CLI makes plus what gotd sends internally; a name prefix is
+// never enough (payments.resolveStarGiftOffer is a "resolve" that moves money).
 package guard
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"sort"
 	"strings"
 	"sync/atomic"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 )
 
-// readPrefixes are method-name prefixes (after the namespace) treated as reads.
-var readPrefixes = []string{"get", "search", "resolve", "check"}
-
-// transport are non-read-named requests needed to read: media DC auth, pings, CDN.
-var transport = map[string]bool{
+// readMethods are the only requests allowed while read-only.
+var readMethods = map[string]bool{
+	// Reads the commands make.
+	"users.getUsers":             true,
+	"users.getFullUser":          true,
+	"messages.getDialogs":        true,
+	"messages.getHistory":        true,
+	"messages.getReplies":        true,
+	"messages.search":            true,
+	"messages.searchGlobal":      true,
+	"messages.getMessages":       true,
+	"messages.getUnreadMentions": true,
+	"messages.getChats":          true,
+	"messages.getFullChat":       true,
+	"messages.checkChatInvite":   true,
+	"channels.getMessages":       true,
+	"channels.getChannels":       true,
+	"channels.getFullChannel":    true,
+	"contacts.resolveUsername":   true,
+	"contacts.resolvePhone":      true,
+	"contacts.getContacts":       true,
+	"contacts.search":            true,
+	// Media download, incl. other DCs and CDN.
+	"upload.getFile":           true,
+	"upload.getFileHashes":     true,
+	"upload.getCdnFile":        true,
+	"upload.getCdnFileHashes":  true,
+	"upload.reuploadCdnFile":   true,
 	"auth.exportAuthorization": true,
 	"auth.importAuthorization": true,
-	"upload.reuploadCdnFile":   true,
-	"ping":                     true,
-	"ping_delay_disconnect":    true,
+	// gotd internals.
+	"help.getConfig":        true,
+	"help.getCdnConfig":     true,
+	"ping":                  true,
+	"ping_delay_disconnect": true,
 }
-
-// readNamedWrites look like reads but are visible to others or act on the account.
-var readNamedWrites = map[string]bool{
-	"messages.getBotCallbackAnswer": true, // presses an inline button
-	"messages.getInlineBotResults":  true, // sends a query to a bot
-}
-
-// readNamedWriteMarkers deny any method whose name contains them (web views, attach menu, bot apps).
-var readNamedWriteMarkers = []string{"webview", "attachmenu", "botapp"}
 
 // authMethods are allowed only in auth mode (the auth subcommands).
 var authMethods = map[string]bool{
@@ -49,12 +68,28 @@ var authMethods = map[string]bool{
 	"auth.exportLoginToken": true,
 	"auth.importLoginToken": true,
 	"auth.logOut":           true,
+	"account.getPassword":   true, // SRP parameters for the 2FA step
 }
+
+// readNamedWrites look like reads but are visible to others or act on the account.
+// They are not on the allowlist either; listing them keeps them denied if it grows.
+var readNamedWrites = map[string]bool{
+	"messages.getBotCallbackAnswer": true, // presses an inline button
+	"ephemeral.getCallbackAnswer":   true, // presses an inline button
+	"messages.getInlineBotResults":  true, // sends a query to a bot
+}
+
+// readNamedWriteMarkers deny any method whose name contains them (web views, attach menu, bot apps).
+var readNamedWriteMarkers = []string{"webview", "attachmenu", "botapp"}
 
 // alwaysDenied are refused even with read-only off: approving another device's login.
 var alwaysDenied = map[string]bool{
 	"auth.acceptLoginToken": true,
 }
+
+// riskyFields are argument names that turn a read into a write (spend Stars,
+// publish location, count a view). A non-zero value blocks the request.
+var riskyFields = []string{"Paid", "Stars", "Expires", "Increment"}
 
 // BlockedError is returned for a refused request.
 type BlockedError struct {
@@ -78,46 +113,59 @@ func MethodName(req any) string {
 }
 
 // Allowed reports whether a method name may be called while read-only.
-// It cannot see request fields; Check also handles messages.getMessagesViews.
+// Check also refuses allowed methods used with write-like arguments.
 func Allowed(name string, authMode bool) bool {
 	if name == "" || alwaysDenied[name] || readNamedWrites[name] {
 		return false
 	}
-	if authMethods[name] {
-		return authMode
-	}
-	if transport[name] {
-		return true
-	}
-	method := name
-	if i := strings.LastIndexByte(name, '.'); i >= 0 {
-		method = name[i+1:]
-	}
-	low := strings.ToLower(method)
+	low := strings.ToLower(name)
 	for _, m := range readNamedWriteMarkers {
 		if strings.Contains(low, m) {
 			return false
 		}
 	}
-	for _, p := range readPrefixes {
-		if hasWordPrefix(method, p) {
-			return true
-		}
+	if authMethods[name] {
+		return authMode
 	}
-	return false
+	return readMethods[name]
 }
 
-// hasWordPrefix matches "get" in "get" and "getHistory" but not "getaway".
-func hasWordPrefix(method, prefix string) bool {
-	if !strings.HasPrefix(method, prefix) {
-		return false
+// AllowedMethods lists the read-only allowlist (sorted), for tests and docs.
+func AllowedMethods(authMode bool) []string {
+	var out []string
+	for m := range readMethods {
+		out = append(out, m)
 	}
-	rest := method[len(prefix):]
-	if rest == "" {
-		return true
+	if authMode {
+		for m := range authMethods {
+			out = append(out, m)
+		}
 	}
-	r, _ := utf8.DecodeRuneInString(rest)
-	return unicode.IsUpper(r)
+	sort.Strings(out)
+	return out
+}
+
+// riskyArgument names a set write-like argument of req, or "".
+func riskyArgument(req any) string {
+	v := reflect.ValueOf(req)
+	if v.Kind() == reflect.Pointer {
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return ""
+	}
+	for i := 0; i < v.NumField(); i++ {
+		f := v.Type().Field(i)
+		for _, r := range riskyFields {
+			if strings.Contains(f.Name, r) && f.IsExported() && !v.Field(i).IsZero() {
+				return f.Name
+			}
+		}
+	}
+	if r, ok := req.(*tg.ContactsResolveUsernameRequest); ok && r.Referer != "" {
+		return "Referer" // would attribute a referral
+	}
+	return ""
 }
 
 // inner returns the wrapped query of a wrapper request.
@@ -151,11 +199,11 @@ func Check(req any, readOnly, authMode bool) error {
 	if name == "" {
 		return &BlockedError{Method: fmt.Sprintf("%T", req)}
 	}
-	if v, ok := req.(*tg.MessagesGetMessagesViewsRequest); ok && v.Increment {
-		return &BlockedError{Method: name + " (increment=true)"}
-	}
 	if !Allowed(name, authMode) {
 		return &BlockedError{Method: name}
+	}
+	if f := riskyArgument(req); f != "" {
+		return &BlockedError{Method: name + " (" + f + " set)"}
 	}
 	return nil
 }
@@ -188,7 +236,7 @@ func Middleware(readOnly func() bool, authMode bool) telegram.Middleware {
 			if err := Check(input, readOnly(), authMode); err != nil {
 				var be *BlockedError
 				g, _ := ctx.Value(grantKey{}).(*grant)
-				if !errors.As(err, &be) || be.Always || !g.take(MethodName(input)) {
+				if !errors.As(err, &be) || be.Always || riskyArgument(input) != "" || !g.take(MethodName(input)) {
 					return err
 				}
 			}

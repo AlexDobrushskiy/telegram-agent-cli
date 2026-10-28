@@ -54,7 +54,9 @@ unless the user asked for that message there. Spam-shaped use gets accounts bann
 ## Guard rails (already enforced; don't work around them)
 
 - The binary refuses every non-read Telegram request unless `TGAC_READONLY` is `0|false|no|off`
-  (sends, edits, deletes, reactions, mark-read, typing, joins/leaves, profile changes, bot buttons).
+  (sends, edits, deletes, reactions, mark-read, typing, joins/leaves, profile changes, bot buttons),
+  and refuses every account-changing command the same way: `send`, all `auth` commands except
+  `status` (logins, logout, session import), `hook install|uninstall`.
 - If the guard hook is installed, a permission prompt appears for any non-read command, any
   `TGAC_READONLY` override, any reference to the data dir (`~/.config/telegram-agent-cli` or
   `$TGAC_HOME`), raw MTProto scripts, and file-tool access to the session or config. The prompt is a
@@ -87,8 +89,8 @@ registered watcher sends only with the user's OK on the exact text.
 
 | Symptom | Meaning / fix |
 |---|---|
-| `doctor` shows `authorized: false`, or `AUTH_KEY_UNREGISTERED` / `SESSION_REVOKED` | The session was terminated (Settings → Devices). The user logs in again (`auth qr`). |
-| exit 3, `"code":"readonly"` | A write without `TGAC_READONLY=0`. Get the user's OK first. |
+| `doctor` shows `authorized: false`, or `AUTH_KEY_UNREGISTERED` / `SESSION_REVOKED` | The session was terminated (Settings → Devices). The user logs in again (`TGAC_READONLY=0 telegram-agent-cli auth qr`, in their own terminal). |
+| exit 3, `"code":"readonly"` | A write (send, login, hook install) without `TGAC_READONLY=0`. Get the user's OK first. |
 | exit 4, `ambiguous` | The chat name matched several chats; use an id from the candidates. |
 | exit 5, `flood_wait` | Telegram rate-limited a method; wait `details.retry_after` seconds, don't retry in a loop. |
 | exit 6, `lock_busy` | Another call (often a long `wait-new` poll) held the lock; retry shortly. |

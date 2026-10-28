@@ -94,7 +94,7 @@ func (a *App) hookInstallCmd() *cobra.Command {
 	var dryRun bool
 	c := &cobra.Command{
 		Use:   "install",
-		Short: "Add TGAC_READONLY=1 and the guard hooks to Claude Code settings (idempotent, backs up)",
+		Short: "Add TGAC_READONLY=1 and the guard hooks to Claude Code settings (needs TGAC_READONLY=0 unless --dry-run)",
 		Args:  noArgs,
 		RunE: func(*cobra.Command, []string) error {
 			p, err := resolveSettings(path)
@@ -122,7 +122,7 @@ func (a *App) hookUninstallCmd() *cobra.Command {
 	var dryRun bool
 	c := &cobra.Command{
 		Use:   "uninstall",
-		Short: "Remove the guard hooks and TGAC_READONLY=1 from Claude Code settings (backs up)",
+		Short: "Remove the guard hooks and TGAC_READONLY=1 from Claude Code settings (needs TGAC_READONLY=0 unless --dry-run)",
 		Args:  noArgs,
 		RunE: func(*cobra.Command, []string) error {
 			p, err := resolveSettings(path)

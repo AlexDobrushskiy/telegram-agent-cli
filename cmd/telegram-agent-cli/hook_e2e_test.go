@@ -47,7 +47,15 @@ func TestHookEndToEnd(t *testing.T) {
 		return out.String(), code
 	}
 
-	if out, code := run("", bin, "hook", "install"); code != 0 || !strings.Contains(out, `"changed":true`) {
+	// Installing is a write: the binary refuses it in read-only mode.
+	if out, code := run("", bin, "hook", "install"); code != 3 || !strings.Contains(out, `"code":"readonly"`) {
+		t.Fatalf("read-only install: %d %s", code, out)
+	}
+	base := env
+	env = append(append([]string{}, base...), "TGAC_READONLY=0")
+	out, code := run("", bin, "hook", "install")
+	env = base
+	if code != 0 || !strings.Contains(out, `"changed":true`) {
 		t.Fatalf("install: %d %s", code, out)
 	}
 	var s struct {
@@ -103,6 +111,7 @@ func TestHookEndToEnd(t *testing.T) {
 		}
 	}
 
+	env = append(append([]string{}, base...), "TGAC_READONLY=0")
 	if out, code := run("", bin, "hook", "uninstall"); code != 0 || !strings.Contains(out, `"changed":true`) {
 		t.Fatalf("uninstall: %d %s", code, out)
 	}
