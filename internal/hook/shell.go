@@ -20,6 +20,7 @@ const (
 type token struct {
 	kind    tokKind
 	text    string   // word value with quotes removed, or the operator
+	pat     string   // the word as a pattern (see markVar)
 	quoted  bool     // some part of the word was quoted or escaped
 	dynamic bool     // contains an expansion or substitution
 	glob    bool     // unquoted glob or brace chars
@@ -55,6 +56,7 @@ type lexer struct {
 	pending []*heredoc
 	depth   int              // nesting of substitutions
 	sb      *strings.Builder // receives double-quoted text while set
+	pb      *strings.Builder // receives its pattern
 }
 
 const maxLexDepth = 16
@@ -237,7 +239,7 @@ func (l *lexer) readHeredocs() {
 
 // word lexes one shell word starting at l.i.
 func (l *lexer) word() (token, error) {
-	var b strings.Builder
+	var b, p strings.Builder
 	tok := token{kind: tWord, start: l.abs(l.i)}
 	braces := false
 	for l.i < len(l.src) {
@@ -254,11 +256,13 @@ func (l *lexer) word() (token, error) {
 			if l.i+1 < len(l.src) {
 				if l.src[l.i+1] != '\n' {
 					b.WriteByte(l.src[l.i+1])
+					p.WriteString(escMeta(l.src[l.i+1 : l.i+2]))
 					tok.quoted = true
 				}
 				l.i += 2
 			} else {
 				b.WriteByte(c)
+				p.WriteString(`\\`)
 				l.i++
 			}
 		case '\'':
@@ -267,27 +271,31 @@ func (l *lexer) word() (token, error) {
 				return tok, errUnterminated
 			}
 			b.WriteString(l.src[l.i+1 : l.i+1+j])
+			p.WriteString(escMeta(l.src[l.i+1 : l.i+1+j]))
 			tok.quoted = true
 			l.i += j + 2
 		case '"':
 			l.i++
-			s, err := l.dquoteText(&tok)
+			s, ps, err := l.dquoteText(&tok)
 			if err != nil {
 				return tok, err
 			}
 			b.WriteString(s)
+			p.WriteString(ps)
 			tok.quoted = true
 		case '`':
 			if err := l.backtick(&tok); err != nil {
 				return tok, err
 			}
 			b.WriteString("`…`")
+			p.WriteByte(markUnknown)
 		case '$':
-			s, err := l.dollar(&tok, true)
+			s, ps, err := l.dollar(&tok, true)
 			if err != nil {
 				return tok, err
 			}
 			b.WriteString(s)
+			p.WriteString(ps)
 		case '<', '>':
 			// process substitution at word start
 			l.i++
@@ -295,6 +303,7 @@ func (l *lexer) word() (token, error) {
 				return tok, err
 			}
 			b.WriteString("<(…)")
+			p.WriteByte(markUnknown)
 		default:
 			if c == '*' || c == '?' || c == '[' {
 				tok.glob = true
@@ -306,29 +315,61 @@ func (l *lexer) word() (token, error) {
 				}
 			}
 			b.WriteByte(c)
+			if c == markVar || c == markUnknown {
+				p.WriteString(escMeta(string(c)))
+			} else {
+				p.WriteByte(c)
+			}
 			l.i++
 		}
 	}
 	tok.text = b.String()
+	tok.pat = p.String()
 	tok.end = l.abs(l.i)
 	return tok, nil
 }
 
-// dquoteText lexes the rest of a "…" string (l.i is past the opening quote).
-func (l *lexer) dquoteText(tok *token) (string, error) {
+// Word patterns (token.pat) keep what quote removal loses: quoted glob
+// characters are backslash-escaped, $NAME / ${NAME} become markVar NAME markVar,
+// and any other expansion or substitution becomes markUnknown.
+const (
+	markVar     = '\x00'
+	markUnknown = '\x01'
+	globMeta    = "*?[]{},\\\x00\x01"
+)
+
+// escMeta escapes the characters a word pattern treats specially.
+func escMeta(s string) string {
+	if !strings.ContainsAny(s, globMeta) {
+		return s
+	}
 	var b strings.Builder
-	l.sb = &b
+	for i := 0; i < len(s); i++ {
+		if strings.IndexByte(globMeta, s[i]) >= 0 {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// dquoteText lexes the rest of a "…" string (l.i is past the opening quote) and
+// returns its text and pattern.
+func (l *lexer) dquoteText(tok *token) (string, string, error) {
+	var b, p strings.Builder
+	l.sb, l.pb = &b, &p
 	err := l.dquote(tok, true)
-	l.sb = nil
-	return b.String(), err
+	l.sb, l.pb = nil, nil
+	return b.String(), p.String(), err
 }
 
 // dquote walks double-quoted text (or an unquoted heredoc body when !closing),
-// collecting substitutions. Text goes to l.sb when set.
+// collecting substitutions. Text goes to l.sb and the pattern to l.pb when set.
 func (l *lexer) dquote(tok *token, closing bool) error {
-	write := func(s string) {
+	write := func(s, pat string) {
 		if l.sb != nil {
 			l.sb.WriteString(s)
+			l.pb.WriteString(pat)
 		}
 	}
 	for l.i < len(l.src) {
@@ -339,38 +380,38 @@ func (l *lexer) dquote(tok *token, closing bool) error {
 				l.i++
 				return nil
 			}
-			write(`"`)
+			write(`"`, `"`)
 			l.i++
 		case '\\':
 			if l.i+1 < len(l.src) && strings.IndexByte("$`\"\\\n", l.src[l.i+1]) >= 0 {
 				if l.src[l.i+1] != '\n' {
-					write(l.src[l.i+1 : l.i+2])
+					write(l.src[l.i+1:l.i+2], escMeta(l.src[l.i+1:l.i+2]))
 				}
 				l.i += 2
 			} else {
-				write(`\`)
+				write(`\`, `\\`)
 				l.i++
 			}
 		case '`':
-			sb := l.sb
-			l.sb = nil
+			sb, pb := l.sb, l.pb
+			l.sb, l.pb = nil, nil
 			err := l.backtick(tok)
-			l.sb = sb
+			l.sb, l.pb = sb, pb
 			if err != nil {
 				return err
 			}
-			write("`…`")
+			write("`…`", string(rune(markUnknown)))
 		case '$':
-			sb := l.sb
-			l.sb = nil
-			s, err := l.dollar(tok, false)
-			l.sb = sb
+			sb, pb := l.sb, l.pb
+			l.sb, l.pb = nil, nil
+			s, ps, err := l.dollar(tok, false)
+			l.sb, l.pb = sb, pb
 			if err != nil {
 				return err
 			}
-			write(s)
+			write(s, ps)
 		default:
-			write(l.src[l.i : l.i+1])
+			write(l.src[l.i:l.i+1], escMeta(l.src[l.i:l.i+1]))
 			l.i++
 		}
 	}
@@ -380,54 +421,63 @@ func (l *lexer) dquote(tok *token, closing bool) error {
 	return nil
 }
 
-// dollar lexes $… at l.i and returns the text to keep in the word.
-func (l *lexer) dollar(tok *token, unquoted bool) (string, error) {
+func isName(s string) bool {
+	if s == "" || s[0] >= '0' && s[0] <= '9' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !isNameChar(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// dollar lexes $… at l.i and returns the text and pattern to keep in the word.
+func (l *lexer) dollar(tok *token, unquoted bool) (string, string, error) {
 	rest := l.src[l.i:]
+	unknown := string(rune(markUnknown))
 	switch {
 	case strings.HasPrefix(rest, "$(("):
 		end := matchParens(l.src, l.i+1)
 		if end < 0 {
-			return "", errUnterminated
+			return "", "", errUnterminated
 		}
 		tok.dynamic = true
 		s := l.src[l.i:end]
 		l.i = end
-		return s, nil
+		return s, unknown, nil
 	case strings.HasPrefix(rest, "$("):
 		l.i++
 		if err := l.subst(tok); err != nil {
-			return "", err
+			return "", "", err
 		}
-		return "$(…)", nil
+		return "$(…)", unknown, nil
 	case strings.HasPrefix(rest, "${"):
 		end := matchBraces(l.src, l.i+1)
 		if end < 0 {
-			return "", errUnterminated
+			return "", "", errUnterminated
 		}
 		tok.dynamic = true
 		s := l.src[l.i:end]
 		l.i = end
-		return s, nil
-	case unquoted && strings.HasPrefix(rest, "$'"):
-		// ANSI-C quoting: escapes can spell any name, so treat as dynamic when used.
-		var b strings.Builder
-		j := l.i + 2
-		for j < len(l.src) && l.src[j] != '\'' {
-			if l.src[j] == '\\' && j+1 < len(l.src) {
-				tok.dynamic = true
-				b.WriteByte(l.src[j+1])
-				j += 2
-				continue
-			}
-			b.WriteByte(l.src[j])
-			j++
+		if inner := s[2 : len(s)-1]; isName(inner) {
+			return s, string(rune(markVar)) + inner + string(rune(markVar)), nil
 		}
-		if j >= len(l.src) {
-			return "", errUnterminated
+		return s, unknown, nil
+	case unquoted && strings.HasPrefix(rest, "$'"):
+		// ANSI-C quoting: decode the escapes, so $'\x74elegram…' is seen as spelled.
+		s, n, ok := ansiC(rest[2:])
+		if !ok {
+			return "", "", errUnterminated
 		}
 		tok.quoted = true
-		l.i = j + 1
-		return b.String(), nil
+		l.i += 2 + n
+		return s, escMeta(s), nil
+	case unquoted && strings.HasPrefix(rest, `$"`):
+		// locale translation: the string itself
+		l.i++
+		return "", "", nil
 	case len(rest) > 1 && (isNameChar(rest[1]) || strings.IndexByte("@*#?$!-", rest[1]) >= 0):
 		j := 2
 		if isNameChar(rest[1]) && (rest[1] < '0' || rest[1] > '9') {
@@ -437,10 +487,107 @@ func (l *lexer) dollar(tok *token, unquoted bool) (string, error) {
 		}
 		tok.dynamic = true
 		l.i += j
-		return rest[:j], nil
+		if isName(rest[1:j]) {
+			return rest[:j], string(rune(markVar)) + rest[1:j] + string(rune(markVar)), nil
+		}
+		return rest[:j], unknown, nil
 	}
 	l.i++
-	return "$", nil
+	return "$", "$", nil
+}
+
+// ansiC decodes the body of $'…' (s starts after the quote). It returns the
+// value and the number of bytes consumed including the closing quote.
+func ansiC(s string) (string, int, bool) {
+	var b strings.Builder
+	hex := func(i, max int) (int, int) {
+		v, n := 0, 0
+		for n < max && i+n < len(s) {
+			c := s[i+n]
+			var d int
+			switch {
+			case c >= '0' && c <= '9':
+				d = int(c - '0')
+			case c >= 'a' && c <= 'f':
+				d = int(c-'a') + 10
+			case c >= 'A' && c <= 'F':
+				d = int(c-'A') + 10
+			default:
+				return v, n
+			}
+			v = v*16 + d
+			n++
+		}
+		return v, n
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\'' {
+			return b.String(), i + 1, true
+		}
+		if c != '\\' || i+1 >= len(s) {
+			b.WriteByte(c)
+			continue
+		}
+		i++
+		switch e := s[i]; e {
+		case 'n':
+			b.WriteByte('\n')
+		case 't':
+			b.WriteByte('\t')
+		case 'r':
+			b.WriteByte('\r')
+		case 'a':
+			b.WriteByte(7)
+		case 'b':
+			b.WriteByte(8)
+		case 'e', 'E':
+			b.WriteByte(27)
+		case 'f':
+			b.WriteByte(12)
+		case 'v':
+			b.WriteByte(11)
+		case 'x':
+			v, n := hex(i+1, 2)
+			if n == 0 {
+				b.WriteString(`\x`)
+				continue
+			}
+			b.WriteByte(byte(v))
+			i += n
+		case 'u', 'U':
+			max := 4
+			if e == 'U' {
+				max = 8
+			}
+			v, n := hex(i+1, max)
+			if n == 0 {
+				b.WriteByte('\\')
+				b.WriteByte(e)
+				continue
+			}
+			b.WriteRune(rune(v))
+			i += n
+		case 'c':
+			if i+1 < len(s) {
+				i++
+				b.WriteByte(s[i] & 0x1f)
+			}
+		default:
+			if e >= '0' && e <= '7' {
+				v, n := 0, 0
+				for n < 3 && i+n < len(s) && s[i+n] >= '0' && s[i+n] <= '7' {
+					v = v*8 + int(s[i+n]-'0')
+					n++
+				}
+				b.WriteByte(byte(v))
+				i += n - 1
+				continue
+			}
+			b.WriteByte(e) // \\ \' \" \?
+		}
+	}
+	return "", 0, false
 }
 
 // subst lexes a (…) substitution body; l.i is at the "(".

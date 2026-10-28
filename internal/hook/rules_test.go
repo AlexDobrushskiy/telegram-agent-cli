@@ -29,9 +29,10 @@ var testFiles = map[string]string{
 
 func testOptions() Options {
 	return Options{
-		DataDirs: []string{testDir, "/data/tg"},
-		UserHome: testHome,
-		Cwd:      "/work",
+		DataDirs:    []string{testDir, "/data/tg"},
+		UserHome:    testHome,
+		Cwd:         "/work",
+		WatcherEnvs: []string{"MY_WATCH_SESS"},
 		ReadFile: func(p string) ([]byte, error) {
 			if s, ok := testFiles[p]; ok {
 				return []byte(s), nil

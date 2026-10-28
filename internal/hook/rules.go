@@ -48,9 +48,6 @@ var secretFiles = map[string]bool{
 }
 
 var (
-	// TGAC_READONLY=v as a shell assignment, and "TGAC_READONLY" = v / : v / , v in code.
-	shellOverrideRe = regexp.MustCompile(`TGAC_READONLY=("[^"]*"|'[^']*'|[^\s;&|)'"]*)`)
-	codeOverrideRe  = regexp.MustCompile(`TGAC_READONLY(?:["'\])]+\s*|\s+)(?:=|:|,)\s*["']?([^\s"';&|)\]}]*)|TGAC_READONLY\s*[:,]\s*["']?([^\s"';&|)\]}]*)`)
 	// an assignment or expansion of TGAC_HOME, in shell or code; a bare mention is fine
 	homeVarRe = regexp.MustCompile(`TGAC_HOME\+?=|\$\{?TGAC_HOME\b|TGAC_HOME["'\])]+\s*(?:=|:|,)|\b(?i:environ|getenv|printenv|env)\W{0,3}TGAC_HOME\b`)
 	rawLibRe  = regexp.MustCompile(`(?i)\b(telethon|gotd|pyrogram|gramjs|mtproto)\b`)
@@ -64,7 +61,10 @@ type Options struct {
 	UserHome string                            // for ~ and $HOME forms
 	Cwd      string                            // base for relative paths
 	ReadFile func(path string) ([]byte, error) // script files named in a command
-	Deadline time.Duration                     // Run's time budget (DefaultDeadline if zero)
+	// WatcherEnvs are the watcher session variable names (config watcher_session_env);
+	// the default name is always included.
+	WatcherEnvs []string
+	Deadline    time.Duration // Run's time budget (DefaultDeadline if zero)
 }
 
 // DefaultOptions protects $TGAC_HOME (if set) and the default data dir.
@@ -80,6 +80,7 @@ func DefaultOptions() Options {
 			o.DataDirs = append(o.DataDirs, def)
 		}
 	}
+	o.WatcherEnvs = WatcherEnvsFor(o.DataDirs)
 	return o
 }
 
@@ -139,19 +140,7 @@ func CheckBash(cmd string, o Options) []string {
 
 // rawRules are text checks that apply anywhere, code or shell.
 func (s *scanner) rawRules(text string) {
-	var vals []string
-	for _, m := range shellOverrideRe.FindAllStringSubmatch(text, -1) {
-		vals = append(vals, strings.Trim(m[1], `"'`))
-	}
-	for _, m := range codeOverrideRe.FindAllStringSubmatch(text, -1) {
-		vals = append(vals, m[1]+m[2])
-	}
-	for _, v := range vals {
-		if v == "" || strings.ContainsAny(v, "$`") || !config.ReadOnlyFrom(v) {
-			s.reasons.add("sets " + config.EnvReadOnly + " to a non-read-only value")
-			break
-		}
-	}
+	s.envText(text)
 	if homeVarRe.MatchString(text) {
 		s.reasons.add("sets or reads " + config.EnvHome)
 	}

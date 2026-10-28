@@ -91,13 +91,14 @@ type scanner struct {
 	written map[string]string // files written by those heredocs in this command
 	cond    []string          // reasons that count only if the command mentions the binary
 	files   map[string]bool
+	env     map[string]envKind // protected variables
 }
 
 func newScanner(o Options) *scanner {
 	if o.ReadFile == nil {
 		o.ReadFile = readScript
 	}
-	return &scanner{o: o, dirRes: dirPatterns(o), written: map[string]string{}, files: map[string]bool{}}
+	return &scanner{o: o, dirRes: dirPatterns(o), written: map[string]string{}, files: map[string]bool{}, env: envNames(o)}
 }
 
 // scanTop analyses the command and returns the text the text rules should see.
@@ -203,12 +204,21 @@ func (s *scanner) command(cmd *command, c ctx) {
 			}
 		}
 	}
-	s.markData(cmd.words, idx)
+	data := s.markData(cmd.words, idx)
+	for i, w := range cmd.words {
+		if !data[i] {
+			s.envText(w.text) // after quote removal: TGAC_READ''ONLY=0, \=, $'…'
+		}
+	}
+	s.envTargets(cmd.words, idx)
 	s.argv(cmd.words, cmd, c)
 }
 
 // dataFlags carry message text (commit messages, PR titles and bodies), not code.
 var dataFlags = set("-m", "--message", "--body", "--title")
+
+// vcs take a message after a short-flag cluster ending in m.
+var vcs = set("git", "hg", "jj", "sl", "svn")
 
 var greps = set("grep", "egrep", "fgrep", "rg", "ag", "ack")
 
@@ -216,64 +226,74 @@ var grepValues = set("-A", "-B", "-C", "-m", "-f", "-g", "-t", "-T", "-d", "-D",
 	"--max-count", "--include", "--exclude", "--context", "--file")
 
 // markData excludes message-text flag values and search patterns from the text
-// rules. Words with expansions or substitutions stay checked.
-func (s *scanner) markData(words []token, idx int) {
+// rules and returns their indices in words. Words with expansions or
+// substitutions stay checked.
+func (s *scanner) markData(words []token, idx int) map[int]bool {
+	data := map[int]bool{}
 	if idx < 0 {
-		return
+		return data
 	}
-	mark := func(w token) {
-		if w.start >= 0 && !w.dynamic {
+	mark := func(i int) {
+		w := words[i]
+		if w.dynamic {
+			return
+		}
+		data[i] = true
+		if w.start >= 0 {
 			s.inert = append(s.inert, [2]int{w.start, w.end})
 		}
 	}
-	args := words[idx+1:]
-	for i, w := range args {
-		if dataFlags[w.text] && i+1 < len(args) {
-			mark(args[i+1])
+	first := idx + 1
+	prog := base(words[idx].text)
+	for i := first; i < len(words); i++ {
+		t := words[i].text
+		short := vcs[prog] && len(t) > 2 && t[0] == '-' && t[1] != '-' && t[len(t)-1] == 'm' // git commit -am MSG
+		if (dataFlags[t] || short || prog == "gh" && (t == "-b" || t == "-t")) && i+1 < len(words) {
+			mark(i + 1)
 		}
-		if k, _, ok := strings.Cut(w.text, "="); ok && strings.HasPrefix(k, "--") && dataFlags[k] {
-			mark(w)
+		if k, _, ok := strings.Cut(t, "="); ok && strings.HasPrefix(k, "--") && dataFlags[k] {
+			mark(i)
 		}
 	}
-	prog := base(words[idx].text)
 	if prog == "git" {
-		for i := 0; i < len(args); i++ {
-			t := args[i].text
+		for i := first; i < len(words); i++ {
+			t := words[i].text
 			if t == "-C" || t == "-c" {
 				i++
 				continue
 			}
 			if !strings.HasPrefix(t, "-") {
 				if t == "grep" {
-					prog, args = "grep", args[i+1:]
+					prog, first = "grep", i+1
 				}
 				break
 			}
 		}
 	}
 	if !greps[prog] {
-		return
+		return data
 	}
 	explicit := false
-	for i, w := range args {
-		if (w.text == "-e" || w.text == "--regexp") && i+1 < len(args) {
-			mark(args[i+1])
+	for i := first; i < len(words); i++ {
+		t := words[i].text
+		if (t == "-e" || t == "--regexp") && i+1 < len(words) {
+			mark(i + 1)
 			explicit = true
-		} else if strings.HasPrefix(w.text, "--regexp=") {
-			mark(w)
+		} else if strings.HasPrefix(t, "--regexp=") {
+			mark(i)
 			explicit = true
 		}
 	}
 	if explicit {
-		return
+		return data
 	}
-	for i := 0; i < len(args); i++ {
-		t := args[i].text
+	for i := first; i < len(words); i++ {
+		t := words[i].text
 		if t == "--" {
-			if i+1 < len(args) {
-				mark(args[i+1])
+			if i+1 < len(words) {
+				mark(i + 1)
 			}
-			return
+			return data
 		}
 		if strings.HasPrefix(t, "-") {
 			if grepValues[t] {
@@ -281,9 +301,10 @@ func (s *scanner) markData(words []token, idx int) {
 			}
 			continue
 		}
-		mark(args[i])
-		return
+		mark(i)
+		return data
 	}
+	return data
 }
 
 // skipPrefix returns the index of the program word (-1 if none) and any

@@ -33,6 +33,7 @@ func (a *App) hookOptions() hook.Options {
 		}
 	}
 	o.DataDirs = dirs
+	o.WatcherEnvs = hook.WatcherEnvsFor(dirs)
 	return o
 }
 
