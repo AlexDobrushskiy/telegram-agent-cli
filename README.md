@@ -232,20 +232,25 @@ path, and nothing is allowed until you add an entry to `watchers.json` in the da
 
 The watcher's `dir` holds `state.json` (`active_watcher`: the id of the agent session allowed to
 send; `chats`: allowlisted chat ids → note), an optional `PAUSE` file, and `sends.log` (one JSON line
-per attempt). `watch reply` refuses (exit 7, reason in the JSON) unless:
+per attempt). `watch reply` works in read-only mode (the guard lets exactly that one
+`messages.sendMessage` through) and refuses (exit 7, reason in `error.message`, a stable id in
+`error.details.rule`) unless:
 
-- the watcher is registered, no `PAUSE` in its dir and no `PAUSE-ALL` in the data dir;
+- no `PAUSE-ALL` in the data dir, the watcher is registered with a valid entry, no `PAUSE` in its dir;
 - the caller's session id (env `TGAC_WATCHER_SESSION`, configurable) equals `active_watcher`;
-- the chat fits the scope: `listed` = in `state.json` chats; `contacts` = a mutual contact or listed;
-  `dm-first` = a 1:1 chat where they wrote first;
-- groups and channels only with `"groups": true`; there `--reply-to` is required, the target is not
-  yours, not already answered by any watcher (`answered.jsonl`), and with `mentions_only` it mentions
-  or replies to you;
-- in 1:1 chats the latest message is theirs; you (not a watcher) haven't written in that chat within
-  `backoff_minutes`;
-- the text is 1…`max_chars` characters, and the per-watcher (`per_hour`), global (`global_per_hour`)
-  and per-chat (`per_chat_seconds`) limits hold.
+- the text is 1…`max_chars` characters, and the per-watcher (`per_hour`), global (`global_per_hour`,
+  counted across all watchers' logs and the ledger) and per-chat (`per_chat_seconds`) limits hold;
+- the chat is a 1:1 with a person (not a bot, not Saved Messages) that fits the scope: `listed` = in
+  `state.json` chats; `contacts` = a mutual contact or listed; `dm-first` = they wrote first; or a
+  group (never a broadcast channel) with `"groups": true` that is also listed in `state.json`;
+- 1:1: the latest message is theirs and no watcher answered it yet; you haven't written in the chat
+  within `backoff_minutes` (watcher replies, known from `answered.jsonl`, don't count);
+- group: `--reply-to` is required; the target is not yours, not in `answered.jsonl`, and no message
+  of yours replies to it; with `mentions_only` it mentions you or replies to you; you haven't written
+  in the group within `backoff_minutes`;
+- a chat too busy to verify these rules from its recent history is refused, not guessed.
 
+Checks and the send run under a lock in the data dir, so two watchers cannot answer one message.
 `--dry-run` runs every check and reports what it would send. `watch list` and `watch check --watcher
 NAME` validate the registry offline. Stop everything at once with `touch <data dir>/PAUSE-ALL`.
 
