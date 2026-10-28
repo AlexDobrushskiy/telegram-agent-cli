@@ -217,7 +217,8 @@ path, and nothing is allowed until you add an entry to `watchers.json` in the da
 ```json
 {
   "helper": {
-    "dir": "/path/to/helper-workdir",
+    "session": "the-watcher-session-id",
+    "chats": {"123456789": "customer who wrote first"},
     "scope": "dm-first",
     "groups": false,
     "mentions_only": true,
@@ -225,24 +226,29 @@ path, and nothing is allowed until you add an entry to `watchers.json` in the da
     "per_hour": 20,
     "per_chat_seconds": 20,
     "backoff_minutes": 15,
+    "dir": "/path/to/helper-workdir",
     "approved": "who approved this and when"
   }
 }
 ```
 
-The watcher's `dir` holds `state.json` (`active_watcher`: the id of the agent session allowed to
-send; `chats`: allowlisted chat ids → note), an optional `PAUSE` file, and `sends.log` (one JSON line
-per attempt). `watch reply` works in read-only mode (the guard lets exactly that one
-`messages.sendMessage` through) and refuses (exit 7, reason in `error.message`, a stable id in
-`error.details.rule`) unless:
+Everything a watcher is trusted with lives in this entry, which only you edit: `session` is the id
+the calling session must present (env `TGAC_WATCHER_SESSION`, configurable), `chats` is the
+allowlist (chat id → note). The optional `dir` is the watcher's own workdir; a `PAUSE` file there
+pauses it, and the watcher may keep notes there, but nothing in it grants anything. Every send
+attempt is logged to `<data dir>/watchers/NAME/sends.jsonl`, where a watcher can't rewrite its own
+rate history; `<data dir>/watchers/NAME/PAUSE` also pauses it. `watch reply` works in read-only
+mode (the guard lets exactly that one `messages.sendMessage` through) and refuses (exit 7, reason
+in `error.message`, a stable id in `error.details.rule`) unless:
 
-- no `PAUSE-ALL` in the data dir, the watcher is registered with a valid entry, no `PAUSE` in its dir;
-- the caller's session id (env `TGAC_WATCHER_SESSION`, configurable) equals `active_watcher`;
-- the text is 1…`max_chars` characters, and the per-watcher (`per_hour`), global (`global_per_hour`,
-  counted across all watchers' logs and the ledger) and per-chat (`per_chat_seconds`) limits hold;
+- no `PAUSE-ALL` in the data dir, the watcher is registered with a valid entry, no `PAUSE` for it;
+- the caller's session id equals the entry's `session` (refusals never show either value);
+- the text is 1…`max_chars` characters, and the per-watcher (`per_hour`: its log or its ledger rows,
+  whichever is larger), global (`global_per_hour`: all watcher logs or the ledger) and per-chat
+  (`per_chat_seconds`) limits hold;
 - the chat is a 1:1 with a person (not a bot, not Saved Messages) that fits the scope: `listed` = in
-  `state.json` chats; `contacts` = a mutual contact or listed; `dm-first` = they wrote first; or a
-  group (never a broadcast channel) with `"groups": true` that is also listed in `state.json`;
+  `chats`; `contacts` = a mutual contact or listed; `dm-first` = they wrote first (for flows that
+  answer new people); or a group (never a broadcast channel) with `"groups": true` that is listed;
 - 1:1: the latest message is theirs and no watcher answered it yet; you haven't written in the chat
   within `backoff_minutes` (watcher replies, known from `answered.jsonl`, don't count);
 - group: `--reply-to` is required; the target is not yours, not in `answered.jsonl`, and no message
@@ -251,8 +257,11 @@ per attempt). `watch reply` works in read-only mode (the guard lets exactly that
 - a chat too busy to verify these rules from its recent history is refused, not guessed.
 
 Checks and the send run under a lock in the data dir, so two watchers cannot answer one message.
+The registry is re-read after taking that lock and again right before sending: removing the entry,
+changing `session`, delisting the chat or adding a `PAUSE` stops a reply already in flight.
 `--dry-run` runs every check and reports what it would send. `watch list` and `watch check --watcher
-NAME` validate the registry offline. Stop everything at once with `touch <data dir>/PAUSE-ALL`.
+NAME` validate the registry offline and show only whether a session binding is set. Stop
+everything at once with `touch <data dir>/PAUSE-ALL`.
 
 A typical loop: `messages wait-new --state state/wm.json --dms` → the agent drafts a reply →
 `watch reply --watcher helper --chat ID --text "…"`.
