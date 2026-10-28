@@ -119,7 +119,7 @@ func (s *Session) IterDialogs(ctx context.Context, folder Folder, fn func(Dialog
 			}
 			seen[id] = true
 			newOnes++
-			if !fn(s.dialog(d, p, ents, byKey[dialogKey{id, d.TopMessage}])) {
+			if !fn(s.dialog(d, p, ents, byKey[dialogKey{id, d.TopMessage}], folder == FolderArchive)) {
 				return nil
 			}
 		}
@@ -132,11 +132,13 @@ func (s *Session) IterDialogs(ctx context.Context, folder Folder, fn func(Dialog
 	}
 }
 
-func (s *Session) dialog(d *tg.Dialog, p Peer, ents *entities, top tg.MessageClass) Dialog {
+// dialog converts one entry; fromArchive marks dialogs listed from folder 1
+// (Telegram leaves folder_id unset there).
+func (s *Session) dialog(d *tg.Dialog, p Peer, ents *entities, top tg.MessageClass, fromArchive bool) Dialog {
 	out := Dialog{
 		ID: p.ID, Name: p.Name, Type: p.Type, Username: strPtr(p.Username),
 		Unread: d.UnreadCount, Mentions: d.UnreadMentionsCount, Pinned: d.Pinned,
-		Archived: d.FolderID == 1,
+		Archived: fromArchive || d.FolderID == 1,
 		Muted:    d.NotifySettings.MuteUntil > int(s.now().Unix()),
 		Peer:     p, TopMessage: d.TopMessage, ReadInboxMaxID: d.ReadInboxMaxID,
 	}

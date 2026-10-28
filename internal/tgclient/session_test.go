@@ -384,6 +384,9 @@ func (s *fakeServer) addDialogs(n, pinned int) {
 		s.users = append(s.users, &tg.User{ID: uid, FirstName: fmt.Sprintf("Person %03d", i), AccessHash: uid * 3})
 		s.msgs[uid] = append(s.msgs[uid], &tg.Message{ID: 1, PeerID: &tg.PeerUser{UserID: uid}, Date: msgDate(n - i), Message: "hello"})
 		d := &tg.Dialog{Peer: &tg.PeerUser{UserID: uid}, TopMessage: 1, UnreadCount: i % 3, Pinned: i < pinned}
+		if i%10 == 9 {
+			d.SetFolderID(1)
+		}
 		if i == 5 {
 			d.NotifySettings.MuteUntil = int(time.Now().Add(time.Hour).Unix())
 		}
@@ -663,5 +666,36 @@ func TestMentionsSkipsUnreadableChat(t *testing.T) {
 	got, err := srv.session(true).Mentions(context.Background(), nil, MentionsQuery{Limit: 10})
 	if err != nil || fmt.Sprint(ids(got)) != "[4 2]" {
 		t.Fatalf("%v %v", ids(got), err)
+	}
+}
+
+func TestDialogArchivedFlag(t *testing.T) {
+	srv := newServer(t)
+	srv.addDialogs(20, 0) // every 10th has folder_id=1
+	s := srv.session(true)
+	archived := func(folder Folder) map[int64]bool {
+		out := map[int64]bool{}
+		if err := s.IterDialogs(context.Background(), folder, func(d Dialog) bool {
+			out[d.ID] = d.Archived
+			return true
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	// All folders: derived from folder_id.
+	for id, a := range archived(FolderAll) {
+		if want := (id-1000)%10 == 9; a != want {
+			t.Errorf("FolderAll %d archived=%v, want %v", id, a, want)
+		}
+	}
+	// Listed from the archive folder: always archived, even without folder_id.
+	for id, a := range archived(FolderArchive) {
+		if !a {
+			t.Errorf("FolderArchive %d archived=false", id)
+		}
+	}
+	if srv.calls("messages.getDialogs") < 2 {
+		t.Fatal("expected one listing per folder")
 	}
 }
