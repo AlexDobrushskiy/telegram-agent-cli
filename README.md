@@ -17,9 +17,11 @@ session (MTProto), and a user session can do everything you can: send, delete, l
 your profile. This tool gives agents the reading part and makes everything else deliberate:
 
 - **Read-only by default, enforced on every request.** A gotd middleware checks each MTProto call
-  before it leaves the process and refuses anything that is not on a read allowlist (`get*`,
-  `search*`, `resolve*`, `check*`, plus media-download plumbing), and the read-named calls that act
-  (pressing a bot button, inline queries, web apps, view-counter bumps).
+  before it leaves the process and refuses anything that is not on an exact allowlist: the 28 read
+  calls the tool makes (dialogs, history, search, resolve, media download) and gotd's own `ping`s.
+  Allowed calls are still refused when they carry a write-like argument (spending Stars, sharing
+  location, counting a view, a referral). Read-*named* calls that act, such as pressing a bot button
+  or accepting a gift offer, are not on the list.
 - **Reading leaves no trace.** It never marks messages read, never sets online/typing status, never
   increments channel views.
 - **JSON everywhere**, stable exit codes, no prompts except the interactive login.
@@ -177,8 +179,9 @@ Failure:
 
 Four layers, each independent:
 
-1. **MTProto middleware (in the binary).** Every request is checked against the read allowlist
-   before it is sent. Writes pass only when `TGAC_READONLY` is exactly `0`, `false`, `no` or `off`;
+1. **MTProto middleware (in the binary).** Every request is checked against an exact allowlist of
+   read methods (pinned by a test that walks every request type in gotd, so an upgrade cannot widen
+   it) before it is sent. Writes pass only when `TGAC_READONLY` is exactly `0`, `false`, `no` or `off`;
    unset or anything else means read-only. Login methods are allowed only inside `auth`
    subcommands, and approving another device's login (`auth.acceptLoginToken`) is never allowed.
 2. **Read-only default in the agent's environment.** `hook install` sets `TGAC_READONLY=1` in Claude

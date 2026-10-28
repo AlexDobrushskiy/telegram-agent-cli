@@ -3,6 +3,9 @@ package guard
 import (
 	"context"
 	"errors"
+	"reflect"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/gotd/td/bin"
@@ -23,8 +26,12 @@ func TestReadsPass(t *testing.T) {
 		&tg.ContactsResolvePhoneRequest{Phone: "10000000000"},
 		&tg.ContactsSearchRequest{Q: "x"},
 		&tg.UploadGetFileRequest{Location: &tg.InputDocumentFileLocation{}},
-		&tg.UpdatesGetStateRequest{},
-		&tg.MessagesGetMessagesViewsRequest{Peer: peer, ID: []int{1}},
+		&tg.UploadGetFileHashesRequest{Location: &tg.InputDocumentFileLocation{}},
+		&tg.UploadGetCDNFileRequest{},
+		&tg.UploadGetCDNFileHashesRequest{},
+		&tg.MessagesGetChatsRequest{ID: []int64{5}},
+		&tg.ChannelsGetChannelsRequest{ID: []tg.InputChannelClass{channel}},
+		&tg.HelpGetCDNConfigRequest{},
 		&tg.MessagesGetDialogsRequest{OffsetPeer: &tg.InputPeerEmpty{}},
 		&tg.MessagesGetRepliesRequest{Peer: peer},
 		&tg.MessagesGetUnreadMentionsRequest{Peer: peer},
@@ -37,7 +44,6 @@ func TestReadsPass(t *testing.T) {
 		&tg.MessagesCheckChatInviteRequest{Hash: "abc"},
 		&tg.ContactsGetContactsRequest{},
 		&tg.HelpGetConfigRequest{},
-		&tg.AccountGetPasswordRequest{},
 		&tg.AuthExportAuthorizationRequest{DCID: 4},
 		&tg.AuthImportAuthorizationRequest{ID: 1},
 		&tg.UploadReuploadCDNFileRequest{},
@@ -102,6 +108,21 @@ func TestWritesBlocked(t *testing.T) {
 		&tg.InvokeWithLayerRequest{Layer: tg.Layer, Query: &tg.MessagesSendMessageRequest{Peer: peer}},
 		&tg.InitConnectionRequest{Query: &tg.InvokeWithoutUpdatesRequest{Query: &tg.MessagesReadHistoryRequest{Peer: peer}}},
 		&tg.InvokeWithLayerRequest{Layer: tg.Layer},
+		// Read-named writes that a get/search/resolve/check prefix rule let through.
+		&tg.PaymentsResolveStarGiftOfferRequest{},
+		&tg.EphemeralGetCallbackAnswerRequest{},
+		&tg.ContactsGetLocatedRequest{SelfExpires: 60},
+		&tg.ChannelsSearchPostsRequest{AllowPaidStars: 10},
+		&tg.MessagesCheckURLAuthMatchCodeRequest{},
+		// Reads the CLI never makes are off the allowlist too.
+		&tg.UpdatesGetStateRequest{},
+		&tg.MessagesGetMessagesViewsRequest{Peer: peer, ID: []int{1}},
+		&tg.MessagesGetWebPagePreviewRequest{},
+		&tg.AccountCheckUsernameRequest{},
+		&tg.AccountGetPasswordRequest{},
+		// Allowed methods with write-like arguments.
+		&tg.ContactsResolveUsernameRequest{Username: "example", Referer: "ref"},
+		&tg.InvokeWithoutUpdatesRequest{Query: &tg.ContactsResolveUsernameRequest{Username: "x", Referer: "ref"}},
 	}
 	for _, r := range writes {
 		t.Run(MethodName(r), func(t *testing.T) {
@@ -123,6 +144,7 @@ func TestAuthOnlyInAuthMode(t *testing.T) {
 		&tg.AuthExportLoginTokenRequest{},
 		&tg.AuthImportLoginTokenRequest{},
 		&tg.AuthLogOutRequest{},
+		&tg.AccountGetPasswordRequest{},
 	}
 	for _, r := range auth {
 		if err := Check(r, true, true); err != nil {
@@ -189,19 +211,21 @@ func TestAllowedNames(t *testing.T) {
 		{"messages.search", false, true},
 		{"messages.searchGlobal", false, true},
 		{"contacts.resolveUsername", false, true},
-		{"account.checkUsername", false, true},
-		{"messages.getWebPagePreview", false, true},
 		{"ping", false, true},
 		{"ping_delay_disconnect", false, true},
+		{"account.checkUsername", false, false},
+		{"messages.getWebPagePreview", false, false},
+		{"payments.resolveStarGiftOffer", false, false},
+		{"payments.resolveStarGiftOffer", true, false},
 		{"messages.getaway", false, false},
-		{"messages.gets", false, false},
-		{"messages.checker", false, false},
 		{"messages.sendMessage", false, false},
 		{"messages.requestWebView", false, false},
 		{"messages.getAttachMenuBots", false, false},
 		{"messages.getBotCallbackAnswer", true, false},
 		{"auth.checkPassword", false, false},
 		{"auth.checkPassword", true, true},
+		{"account.getPassword", false, false},
+		{"account.getPassword", true, true},
 		{"auth.acceptLoginToken", true, false},
 		{"", false, false},
 	}
@@ -258,6 +282,9 @@ func TestAllowOnce(t *testing.T) {
 			t.Fatalf("%T passed with a sendMessage grant", req)
 		}
 	}
+	if err := inv.Invoke(ctx, &tg.MessagesSendMessageRequest{Peer: peer, AllowPaidStars: 5}, nil); err == nil {
+		t.Fatal("grant let a paid send through")
+	}
 	if err := inv.Invoke(ctx, &tg.MessagesSendMessageRequest{Peer: peer}, nil); err != nil {
 		t.Fatalf("granted send blocked: %v", err)
 	}
@@ -269,5 +296,100 @@ func TestAllowOnce(t *testing.T) {
 	}
 	if next.calls != 1 {
 		t.Fatalf("calls = %d, want 1", next.calls)
+	}
+}
+
+// wantRead is the full read-only allowlist. Changing the guard or upgrading gotd
+// must not change it without updating this list on purpose.
+var wantRead = []string{
+	"auth.exportAuthorization", "auth.importAuthorization",
+	"channels.getChannels", "channels.getFullChannel", "channels.getMessages",
+	"contacts.getContacts", "contacts.resolvePhone", "contacts.resolveUsername", "contacts.search",
+	"help.getCdnConfig", "help.getConfig",
+	"messages.checkChatInvite", "messages.getChats", "messages.getDialogs", "messages.getFullChat",
+	"messages.getHistory", "messages.getMessages", "messages.getReplies", "messages.getUnreadMentions",
+	"messages.search", "messages.searchGlobal",
+	"upload.getCdnFile", "upload.getCdnFileHashes", "upload.getFile", "upload.getFileHashes", "upload.reuploadCdnFile",
+	"users.getFullUser", "users.getUsers",
+}
+
+// wantAuthExtra is what auth mode adds.
+var wantAuthExtra = []string{
+	"account.getPassword", "auth.checkPassword", "auth.exportLoginToken", "auth.importLoginToken",
+	"auth.logOut", "auth.resendCode", "auth.sendCode", "auth.signIn",
+}
+
+// allowedRequests walks every request type in gotd's tg package.
+func allowedRequests(t *testing.T, authMode bool) (allowed []string, total int) {
+	t.Helper()
+	for _, ctor := range tg.TypesConstructorMap() {
+		obj := ctor()
+		if !strings.HasSuffix(reflect.TypeOf(obj).Elem().Name(), "Request") {
+			continue
+		}
+		total++
+		if Check(obj, true, authMode) == nil {
+			allowed = append(allowed, MethodName(obj))
+		}
+	}
+	sort.Strings(allowed)
+	return allowed, total
+}
+
+func TestAllowlistIsPinned(t *testing.T) {
+	got, total := allowedRequests(t, false)
+	if total < 500 {
+		t.Fatalf("walked only %d request types: the registry walk is broken", total)
+	}
+	if strings.Join(got, ",") != strings.Join(wantRead, ",") {
+		t.Fatalf("read-only allowlist changed.\n got: %v\nwant: %v", got, wantRead)
+	}
+	gotAuth, _ := allowedRequests(t, true)
+	want := append(append([]string{}, wantRead...), wantAuthExtra...)
+	sort.Strings(want)
+	if strings.Join(gotAuth, ",") != strings.Join(want, ",") {
+		t.Fatalf("auth-mode allowlist changed.\n got: %v\nwant: %v", gotAuth, want)
+	}
+	// AllowedMethods = the walk plus ping/ping_delay_disconnect (gotd's mt package, not tg).
+	var listed []string
+	for _, m := range AllowedMethods(false) {
+		if m != "ping" && m != "ping_delay_disconnect" {
+			listed = append(listed, m)
+		}
+	}
+	if strings.Join(listed, ",") != strings.Join(got, ",") {
+		t.Fatalf("AllowedMethods %v disagrees with the walk %v", listed, got)
+	}
+}
+
+func TestRiskyArguments(t *testing.T) {
+	cases := map[string]any{
+		"SelfExpires":    &tg.ContactsGetLocatedRequest{SelfExpires: 60},
+		"AllowPaidStars": &tg.ChannelsSearchPostsRequest{AllowPaidStars: 1},
+		"Increment":      &tg.MessagesGetMessagesViewsRequest{Increment: true},
+		"Referer":        &tg.ContactsResolveUsernameRequest{Referer: "x"},
+	}
+	for want, req := range cases {
+		if got := riskyArgument(req); got != want {
+			t.Errorf("%T: riskyArgument = %q, want %q", req, got, want)
+		}
+	}
+	if riskyArgument(&tg.ChannelsSearchPostsRequest{}) != "" {
+		t.Error("zero values flagged")
+	}
+	// No allowlisted method may grow such an argument unnoticed.
+	for _, ctor := range tg.TypesConstructorMap() {
+		obj := ctor()
+		if !Allowed(MethodName(obj), true) {
+			continue
+		}
+		rt := reflect.TypeOf(obj).Elem()
+		for i := 0; i < rt.NumField(); i++ {
+			for _, r := range riskyFields {
+				if strings.Contains(rt.Field(i).Name, r) {
+					t.Errorf("allowed %s has %s: review it", MethodName(obj), rt.Field(i).Name)
+				}
+			}
+		}
 	}
 }

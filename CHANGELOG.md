@@ -8,7 +8,8 @@ All notable changes to this project are documented here. The format follows
 ### Added
 
 - MTProto user-account client (gotd) with a read-only middleware: every request is checked against
-  a read allowlist before it is sent; writes need `TGAC_READONLY=0|false|no|off`.
+  an exact allowlist of read methods (and write-like arguments) before it is sent; writes need
+  `TGAC_READONLY=0|false|no|off`.
 - Reading never marks read, never sets online/typing status, never increments channel views.
 - JSON envelope (`schema_version` 1) and stable exit codes for every command.
 - Login: `auth init`, `auth qr`, `auth request-code` / `auth verify` / `auth password`,
