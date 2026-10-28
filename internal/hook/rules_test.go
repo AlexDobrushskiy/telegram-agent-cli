@@ -386,6 +386,18 @@ func TestRun(t *testing.T) {
 	}
 
 	for _, p := range []string{
+		`{"tool_name":"Monitor","tool_input":{"command":"telegram-agent-cli send text --chat 1"}}`,
+		`{"tool_name":"Monitor","tool_input":{"ws":"wss://example.com","note":"telegram-agent-cli send"}}`,
+		`{"tool_name":"Monitor","tool_input":{"cmd":"cat ~/.config/telegram-agent-cli/session.json"}}`,
+	} {
+		if out := run(t, p); !strings.Contains(out, `"permissionDecision":"ask"`) {
+			t.Errorf("Run(%s) = %q, want ask", p, out)
+		}
+	}
+
+	for _, p := range []string{
+		`{"tool_name":"Monitor","tool_input":{"command":"tail -f app.log"}}`,
+		`{"tool_name":"Monitor","tool_input":{"ws":"wss://example.com"}}`,
 		`{"tool_name":"Bash","tool_input":{"command":"telegram-agent-cli chats list"}}`,
 		`{"tool_name":"Bash","tool_input":{"command":42}}`,
 		`{"tool_name":"Bash","tool_input":null}`,

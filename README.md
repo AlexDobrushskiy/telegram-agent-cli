@@ -199,7 +199,7 @@ Four layers, each independent:
 2. **Read-only default in the agent's environment.** `hook install` sets `TGAC_READONLY=1` in Claude
    Code's settings, so a write needs an explicit override in the command itself.
 3. **The PreToolUse hook.** Before Claude Code runs a tool, `telegram-agent-cli hook claude-pretooluse`
-   inspects it and forces a permission prompt ("ask") when the call:
+   inspects it (Bash, and Monitor's background commands, the same way) and forces a permission prompt ("ask") when the call:
    - runs `telegram-agent-cli` with a subcommand off the read list (`send`, `auth` other than `status`,
      `hook install`, unknown ones), including through `sudo`, `env`, `timeout`, `xargs`, `sh -c`,
      `bash -lc`, `eval`, `ssh host …`, `find -exec`, `$(…)`, pipes, heredocs fed to a shell, shell
@@ -331,10 +331,10 @@ Environment:
 
 `hook install` edits `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`, or
 `--settings PATH`): it sets `env.TGAC_READONLY` to `"1"` and adds two `PreToolUse` entries, matcher
-`Bash` and matcher `Read|Edit|Write|MultiEdit|NotebookEdit|Grep`, each running
+`Bash|Monitor` and matcher `Read|Edit|Write|MultiEdit|NotebookEdit|Grep`, each running
 `<absolute path of this binary> hook claude-pretooluse`. It keeps every other key, keeps their order,
-appends to an existing `Bash` entry instead of adding a second one, updates the path if the binary
-moved, writes atomically, and saves the previous file as `settings.json.bak-YYYYMMDD-HHMMSS`.
+appends to an existing entry with the same matcher instead of adding a second one, moves the guard
+out of entries with an older matcher (such as plain `Bash`), updates the path if the binary moved, writes atomically, and saves the previous file as `settings.json.bak-YYYYMMDD-HHMMSS`.
 Running it again changes nothing. `--dry-run` prints the diff and the resulting settings. Use
 `--binary PATH` when the binary is reached through a package manager's stable path. `hook uninstall`
 removes the entries and `TGAC_READONLY=1`.

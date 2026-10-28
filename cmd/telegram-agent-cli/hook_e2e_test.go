@@ -89,13 +89,15 @@ func TestHookEndToEnd(t *testing.T) {
 		matcher, payload string
 		ask              bool
 	}{
-		{"Bash", `{"tool_name":"Bash","tool_input":{"command":"telegram-agent-cli send text --chat 1 --message hi"}}`, true},
-		{"Bash", `{"tool_name":"Bash","tool_input":{"command":"TGAC_READONLY=0 telegram-agent-cli me"}}`, true},
-		{"Bash", `{"tool_name":"Bash","tool_input":{"command":"telegram-agent-cli messages list --chat 1"}}`, false},
-		{"Bash", `{"tool_name":"Bash","tool_input":{"command":"git commit -m \"telegram-agent-cli send\""}}`, false},
+		{"Bash|Monitor", `{"tool_name":"Bash","tool_input":{"command":"telegram-agent-cli send text --chat 1 --message hi"}}`, true},
+		{"Bash|Monitor", `{"tool_name":"Bash","tool_input":{"command":"TGAC_READONLY=0 telegram-agent-cli me"}}`, true},
+		{"Bash|Monitor", `{"tool_name":"Bash","tool_input":{"command":"telegram-agent-cli messages list --chat 1"}}`, false},
+		{"Bash|Monitor", `{"tool_name":"Bash","tool_input":{"command":"git commit -m \"telegram-agent-cli send\""}}`, false},
 		{"Read|Edit|Write|MultiEdit|NotebookEdit|Grep", `{"tool_name":"Read","tool_input":{"file_path":"` + session + `"}}`, true},
 		{"Read|Edit|Write|MultiEdit|NotebookEdit|Grep", `{"tool_name":"Read","tool_input":{"file_path":"/etc/hosts"}}`, false},
-		{"Bash", `not json`, false},
+		{"Bash|Monitor", `not json`, false},
+		{"Bash|Monitor", `{"tool_name":"Monitor","tool_input":{"command":"telegram-agent-cli send text --chat 1 --message hi"}}`, true},
+		{"Bash|Monitor", `{"tool_name":"Monitor","tool_input":{"command":"tail -f app.log"}}`, false},
 	} {
 		out, code := run(c.payload, "sh", "-c", cmds[c.matcher])
 		if code != 0 {

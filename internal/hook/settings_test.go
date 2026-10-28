@@ -35,7 +35,7 @@ const freshInstall = `{
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|Monitor",
         "hooks": [
           {
             "type": "command",
@@ -151,10 +151,6 @@ func TestInstallPreserves(t *testing.T) {
                         "type": "command",
                         "command": "~/.claude/hooks/other-guard.py",
                         "timeout": 1.50
-                    },
-                    {
-                        "type": "command",
-                        "command": "/opt/tools/bin/telegram-agent-cli hook claude-pretooluse"
                     }
                 ]
             },
@@ -164,6 +160,15 @@ func TestInstallPreserves(t *testing.T) {
                     {
                         "type": "command",
                         "command": "fetch-guard"
+                    }
+                ]
+            },
+            {
+                "matcher": "Bash|Monitor",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "/opt/tools/bin/telegram-agent-cli hook claude-pretooluse"
                     }
                 ]
             },
@@ -289,6 +294,34 @@ func TestInstallUpdatesAndDedupes(t *testing.T) {
 	}
 	if r, _ := Install(p, newBin, false, now); r.Changed {
 		t.Errorf("not idempotent: %v", r.Actions)
+	}
+}
+
+func TestInstallAppendsToExistingEntry(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "settings.json")
+	write(t, p, `{"hooks": {"PreToolUse": [{"matcher": "Bash|Monitor", "hooks": [{"type": "command", "command": "other"}]}]}}`)
+	if _, err := Install(p, bin, false, now); err != nil {
+		t.Fatal(err)
+	}
+	got := read(t, p)
+	if strings.Count(got, `"matcher": "Bash|Monitor"`) != 1 || !strings.Contains(got, `"command": "other"`) ||
+		strings.Count(got, "hook claude-pretooluse") != 2 {
+		t.Errorf("got\n%s", got)
+	}
+}
+
+func TestInstallMigratesOldBashMatcher(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "settings.json")
+	write(t, p, `{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+	  {"type": "command", "command": "other"},
+	  {"type": "command", "command": "`+bin+` hook claude-pretooluse"}]}]}}`)
+	if _, err := Install(p, bin, false, now); err != nil {
+		t.Fatal(err)
+	}
+	got := read(t, p)
+	if !strings.Contains(got, `"matcher": "Bash"`) || !strings.Contains(got, `"matcher": "Bash|Monitor"`) ||
+		strings.Count(got, "hook claude-pretooluse") != 2 || !strings.Contains(got, `"command": "other"`) {
+		t.Errorf("got\n%s", got)
 	}
 }
 

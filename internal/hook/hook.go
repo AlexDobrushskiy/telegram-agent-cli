@@ -40,8 +40,13 @@ func Evaluate(in Input, o Options) string {
 		o.Cwd = in.Cwd
 	}
 	switch {
-	case in.ToolName == "Bash":
-		reasons := CheckBash(str(in.ToolInput, "command"), o)
+	case in.ToolName == "Bash" || in.ToolName == "Monitor":
+		var reasons []string
+		if cmd, ok := in.ToolInput["command"].(string); ok {
+			reasons = CheckBash(cmd, o)
+		} else if in.ToolName == "Monitor" && mentionsAccount(in.ToolInput, o) {
+			reasons = []string{"a Monitor call without a command field mentions " + BinaryName + " or its data dir"}
+		}
 		if len(reasons) == 0 {
 			return ""
 		}
@@ -55,6 +60,24 @@ func Evaluate(in Input, o Options) string {
 		return "Telegram account data: needs the account owner's explicit OK for this exact file access (" + r + ")"
 	}
 	return ""
+}
+
+// mentionsAccount reports whether any part of a tool input names the binary or a data dir.
+func mentionsAccount(ti map[string]any, o Options) bool {
+	b, err := json.Marshal(ti)
+	if err != nil {
+		return true
+	}
+	text := string(b)
+	if mentionRe.MatchString(text) {
+		return true
+	}
+	for _, re := range dirPatterns(o) {
+		if re.MatchString(text) {
+			return true
+		}
+	}
+	return false
 }
 
 const maxInput = 16 << 20

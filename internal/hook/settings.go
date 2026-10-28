@@ -16,7 +16,7 @@ import (
 const HookArgs = "hook claude-pretooluse"
 
 // Matchers are the PreToolUse matchers the guard is installed under.
-var Matchers = []string{"Bash", "Read|Edit|Write|MultiEdit|NotebookEdit|Grep"}
+var Matchers = []string{"Bash|Monitor", "Read|Edit|Write|MultiEdit|NotebookEdit|Grep"}
 
 // SettingsPath is $CLAUDE_CONFIG_DIR/settings.json or ~/.claude/settings.json.
 func SettingsPath() (string, error) {
