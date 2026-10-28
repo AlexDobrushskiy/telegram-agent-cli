@@ -57,10 +57,12 @@ unless the user asked for that message there. Spam-shaped use gets accounts bann
   (case-insensitive, trimmed) (sends, edits, deletes, reactions, mark-read, typing, joins/leaves,
   profile changes, bot buttons), and refuses every account-changing command the same way: `send`,
   all `auth` commands except `status` (logins, logout, session import), `hook install|uninstall`.
-- If the guard hook is installed, a permission prompt appears for any non-read command, any
-  `TGAC_READONLY` override, any reference to the data dir (`~/.config/telegram-agent-cli` or
-  `$TGAC_HOME`), raw MTProto scripts, and file-tool access to the session or config. The prompt is a
-  question for the user, not their approval.
+- If the guard hook is installed, a permission prompt appears for any non-read command (also from
+  scripts, interpreter code, `xargs` or a pipe into a shell), any `TGAC_READONLY` override, any
+  assignment of the watcher session variable, any reference to the data dir
+  (`~/.config/telegram-agent-cli` or `$TGAC_HOME`, in any spelling) or a recursive read of a parent
+  of it, changes to the guard's Claude Code settings, raw MTProto scripts, and file-tool access to
+  the session or config. The prompt is a question for the user, not their approval.
 - Never read, print, copy or move `session.json` (full account access) or `config.json`
   (`api_hash`). Keep downloads and exports in a scratch directory.
 - Don't log in, log out or import sessions yourself (`auth …`); the user does that.

@@ -204,16 +204,53 @@ Four layers, each independent:
    inspects it (Bash, and Monitor's background commands, the same way) and forces a permission
    prompt ("ask") when the call:
    - runs `telegram-agent-cli` with a subcommand off the read list (`send`, `auth` other than `status`,
-     `hook install`, unknown ones), including through `sudo`, `env`, `timeout`, `xargs`, `sh -c`,
-     `bash -lc`, `eval`, `ssh host …`, `find -exec`, `$(…)`, pipes, heredocs fed to a shell, shell
-     scripts it can read, or `go run …/cmd/telegram-agent-cli`;
-   - sets `TGAC_READONLY` to a false, empty or computed value, or sets or reads `TGAC_HOME`;
-   - references a data dir: `$TGAC_HOME` and the default `~/.config/telegram-agent-cli`, written as
-     an absolute path, `~/…`, `$HOME/…`, `${HOME}/…`, `$XDG_CONFIG_HOME/…` or a relative `.config/…`,
-     compared case-insensitively (a longer name such as `telegram-agent-cli-notes.md` is not the dir);
+     `hook install`, unknown ones), including through `sudo`, `env` (also `-S`/`--split-string`),
+     `timeout`, `script`, `busybox`, `sh -c`, `bash -lc`, `eval`, `ssh host [--] …`, `watch`, `tmux`,
+     `hyperfine`, `find -exec`, shell functions, `$(…)`, pipes, heredocs fed to a shell, shell scripts it
+     can read, or `go run …/cmd/telegram-agent-cli`. `xargs` without `-I` and GNU `parallel` append
+     their input, so the fixed part must already be a full read command (`xargs telegram-agent-cli
+     messages show --chat 1 --id` passes, `xargs telegram-agent-cli` asks);
+   - runs it from interpreter code (`python -c`, `node -e`, `ruby`/`perl -e`, `php -r`, `awk`,
+     `osascript`, heredocs, script files): string literals after the name are its argv
+     (`['telegram-agent-cli', 'auth', 'logout']`), a literal holding a whole command line is parsed
+     as shell, and a call the hook can't resolve (a variable, concatenation, `%`-format) asks;
+   - runs content it can't see: a pipe into a shell or interpreter from anything but literal
+     `echo`/`printf`/`cat` (`… | base64 -d | sh`, `curl … | bash`), `bash <(…)`, `source <(…)`,
+     `sh -c "$(…)"`, `eval "$(…)"`, a script named by a variable, or a script that isn't a readable
+     regular file (a FIFO, a device);
+   - sets `TGAC_READONLY` to a false, empty or computed value in any form: `export
+     TGAC_READ''ONLY=0`, `read`/`printf -v`/`for`/`declare -n`, `${TGAC_READONLY:=0}`, or code such as
+     `os.environ['TGAC_READONLY'] = str(0)` and `$ENV{TGAC_READONLY}=0` (only a plain literal that
+     stays read-only, such as `'1'`, passes); also a `TGAC_` name built from parts;
+   - sets or exports the watcher session variable (`TGAC_WATCHER_SESSION`, or `watcher_session_env`
+     from the data dir's `config.json`);
+   - sets or reads `TGAC_HOME` (`TGAC_HOME=…`, `$TGAC_HOME`, `os.environ['TGAC_HOME']`); a bare
+     mention is fine;
+   - references a data dir: `$TGAC_HOME` and the default `~/.config/telegram-agent-cli`. Each word is
+     normalised first (quote removal, `~`, `$HOME`, `${HOME}`, `$XDG_CONFIG_HOME`, variables set
+     earlier in the command, the cwd and `cd`, `.`/`..`/`//`, globs and braces, symlinks) and
+     compared case-insensitively; a longer name such as `telegram-agent-cli-notes.md` is not the dir.
+     A `telegram-agent-cli/` segment followed by a data-dir file name (`config.json`, `session.json`,
+     `peers.json`, `pending-login.json`, `watchers.json`, `answered.jsonl`, `PAUSE-ALL`) counts
+     whatever comes before it;
+   - reads a directory tree that contains a data dir: `grep -r`, `rg` (with `--hidden`, or a path
+     inside `.config`), `find … -exec`/`-delete` or piped to `xargs`, `tar`, `zip`, `cp -r`, `rsync`
+     and similar on `~`, `~/.config` or `/`;
+   - changes Claude Code settings: `settings.json`/`settings.local.json` in any `.claude` dir or
+     `$CLAUDE_CONFIG_DIR`, and `managed-settings.json`. File tools ask when the text they write or
+     replace names `hooks`, `PreToolUse`, `disableAllHooks`, a `TGAC_` variable or the binary, or when
+     the `hooks`/`env` part of the file would change; Bash asks for redirects, `mv`, `cp`/`ln` onto it,
+     `sed -i`, `rm` and unknown programs pointed at a settings file or a `.claude` dir (`cat`, `jq`,
+     `grep`, `git diff` and other readers pass);
    - mixes an MTProto library (Telethon, gotd, Pyrogram…) with a session file;
    - uses Read on `config.json`, `session.json`, `peers.json` or `pending-login.json` in the data dir,
-     Grep with a path inside the data dir, or Edit/Write/MultiEdit/NotebookEdit anywhere under it.
+     Grep on the data dir or on a directory that contains it (`~`, `~/.config`, `/`, or no path while
+     the cwd is one of those), or Edit/Write/MultiEdit/NotebookEdit anywhere under it;
+   - writes code (any string field of Write/Edit/MultiEdit/NotebookEdit, not the replaced text) that
+     overrides `TGAC_READONLY`, sets the watcher variable, touches the data dir or Claude Code
+     settings, or pairs an MTProto library with a session. Documentation files (`.md`, `.txt`,
+     `.rst`…) are not scanned, so `go test` or `make` can't run unchecked code that was written
+     silently.
 
    The name inside an argument does not count: `git commit -m "…telegram-agent-cli send…"`,
    `grep telegram-agent-cli README.md` or a `claude -p "…"` prompt pass silently. Values of
@@ -229,11 +266,12 @@ Four layers, each independent:
 
 - Code running as your OS user can read the session file. The hook only sees the tool call, not
   what a program does once it runs.
-- Interpreters (`python -c`, `node -e`, scripts) are checked by text only: the hook asks when code
-  overrides `TGAC_READONLY`, touches the data dir or pairs an MTProto library with a session, but it
-  does not follow what the code computes. An agent can obfuscate a command or write its own MTProto
-  client.
-- Files the hook cannot read (unreadable, not a regular file) are not scanned.
+- Interpreter code is followed through string literals, not executed: code that computes the
+  command, builds a variable name in a way the hook can't read, or decodes its own payload can get
+  past it. An agent can also write its own MTProto client.
+- Programs that run other files on their own (`make`, `go test`, `npm run`) are not followed; their
+  files are checked when an agent writes them with the file tools or a heredoc, not when they run.
+- Files the hook can't read (unreadable, not a regular file, over 1 MiB) ask instead of passing.
 - The prompt is a question to you, not your approval. In `bypassPermissions` mode it is the only
   thing between the agent and the command, so read each one before approving.
 
