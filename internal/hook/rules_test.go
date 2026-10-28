@@ -59,6 +59,8 @@ func TestCheckBashAllows(t *testing.T) {
 		"telegram-agent-cli version",
 		"telegram-agent-cli --json me",
 		"telegram-agent-cli watch reply --watcher w --chat 1 --text hi --dry-run",
+		"telegram-agent-cli watch list",
+		"telegram-agent-cli watch check --watcher w",
 		"echo '{}' | telegram-agent-cli hook claude-pretooluse",
 		"telegram-agent-cli messages list --chat send",
 		// help

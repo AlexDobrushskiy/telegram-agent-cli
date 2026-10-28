@@ -25,7 +25,7 @@ var readAllow = map[string][]string{
 	"contacts": {"search"},
 	"media":    {"download"},
 	"auth":     {"status"},
-	"watch":    {"reply"}, // its own gate: registry, scope, rate limits
+	"watch":    {"reply", "list", "check"}, // reply is its own gate: registry, scope, rate limits
 	"hook":     {"claude-pretooluse"},
 	"me":       nil,
 	"doctor":   nil,
