@@ -240,6 +240,7 @@ func (s *scanner) command(cmd *command, c ctx) {
 	}
 	s.envTargets(cmd.words, idx)
 	s.pathRules(cmd, idx, data)
+	s.settingsWrites(cmd, idx, data)
 	s.argv(cmd.words, cmd, c)
 	s.track(cmd, idx)
 }

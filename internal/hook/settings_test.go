@@ -454,3 +454,22 @@ func TestUnifiedDiff(t *testing.T) {
 		t.Errorf("from empty: %q", got)
 	}
 }
+
+func TestInstallDanglingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "settings.json")
+	if err := os.Symlink(filepath.Join(dir, "missing", "settings.json"), link); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []func() error{
+		func() error { _, err := Install(link, bin, false, now); return err },
+		func() error { _, err := Uninstall(link, false, now); return err },
+	} {
+		if err := f(); err == nil || !strings.Contains(err.Error(), "symlink") {
+			t.Errorf("err = %v, want a symlink error", err)
+		}
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("the dangling symlink was replaced")
+	}
+}

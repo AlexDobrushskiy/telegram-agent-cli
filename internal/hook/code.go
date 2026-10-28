@@ -96,6 +96,9 @@ var (
 
 // code analyses interpreter code.
 func (s *scanner) code(text string, c ctx) {
+	if settingsCodeRe.MatchString(text) {
+		s.reasons.add("runs code that touches Claude Code settings")
+	}
 	if c.depth > maxDepth || !mentionRe.MatchString(text) {
 		return
 	}

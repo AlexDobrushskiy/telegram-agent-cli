@@ -671,6 +671,7 @@ type command struct {
 	herestrings []token
 	outFiles    []string // > / >> targets
 	redirs      []token  // every redirect target
+	outRedirs   []token  // targets written by > >> >| &> &>> <>
 	next        *command // the command this one pipes into
 	prev        *command // the command piping into this one
 	pipeIn      bool
@@ -715,6 +716,9 @@ func parse(lx *lexed) ([]*command, error) {
 				cur.herestrings = append(cur.herestrings, target)
 			case ">", ">>", ">|", "&>", "&>>":
 				cur.outFiles = append(cur.outFiles, target.text)
+				cur.outRedirs = append(cur.outRedirs, target)
+			case "<>":
+				cur.outRedirs = append(cur.outRedirs, target)
 			}
 		default:
 			cur.words = append(cur.words, t)

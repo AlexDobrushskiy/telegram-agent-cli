@@ -54,10 +54,17 @@ func Evaluate(in Input, o Options) string {
 		return "Telegram account action: needs the account owner's explicit OK for this exact command (" +
 			strings.Join(reasons, "; ") + ")"
 	case fileTools[in.ToolName]:
-		r := CheckFile(in.ToolName, str(in.ToolInput, "file_path", "notebook_path", "path"), o)
-		if r == "" {
+		var rs []string
+		if r := CheckFile(in.ToolName, str(in.ToolInput, "file_path", "notebook_path", "path"), o); r != "" {
+			rs = append(rs, r)
+		}
+		if r := CheckContent(in.ToolName, in.ToolInput, o); r != "" {
+			rs = append(rs, r)
+		}
+		if len(rs) == 0 {
 			return ""
 		}
+		r := strings.Join(rs, "; ")
 		return "Telegram account data: needs the account owner's explicit OK for this exact file access (" + r + ")"
 	}
 	return ""

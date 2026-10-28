@@ -311,3 +311,99 @@ func TestReqWrappers(t *testing.T) {
 		{`function build { go build ./...; }; build`, ""},
 	})
 }
+
+const installedSettings = `{
+  "env": {"TGAC_READONLY": "1", "OTHER": "x"},
+  "permissions": {"allow": ["Bash(ls:*)"]},
+  "hooks": {"PreToolUse": [{"matcher": "Bash|Monitor", "hooks": [{"type": "command", "command": "/bin/telegram-agent-cli hook claude-pretooluse"}]}]}
+}`
+
+func settingsOptions() Options {
+	o := testOptions()
+	base := o.ReadFile
+	o.ReadFile = func(p string) ([]byte, error) {
+		switch p {
+		case testHome + "/.claude/settings.json", "/work/.claude/settings.json":
+			return []byte(installedSettings), nil
+		}
+		return base(p)
+	}
+	return o
+}
+
+// Rows 2 and 10: Claude Code settings and every string a file tool writes.
+func TestReqFileTools(t *testing.T) {
+	o := settingsOptions()
+	home := testHome + "/.claude/settings.json"
+	cases := []struct {
+		tool  string
+		input map[string]any
+		want  string
+	}{
+		// row 2
+		{"Write", map[string]any{"file_path": ".claude/settings.local.json", "content": `{"env": {"TGAC_READONLY": "0"}}`}, "Claude Code settings"},
+		{"Write", map[string]any{"file_path": "/work/.claude/settings.local.json", "content": `{"disableAllHooks": true}`}, "Claude Code settings"},
+		{"Write", map[string]any{"file_path": home, "content": `{"model": "x"}`}, "Claude Code settings"},
+		{"Edit", map[string]any{"file_path": "~/.claude/settings.json", "old_string": `"OTHER": "x"`, "new_string": `"OTHER": "x", "TGAC_READONLY": "1"`}, "Claude Code settings"},
+		{"Edit", map[string]any{"file_path": home, "old_string": `"permissions"`, "new_string": `"hooks": {}, "permissions"`}, "Claude Code settings"},
+		{"Edit", map[string]any{"file_path": home, "old_string": `"1"`, "new_string": `"0"`}, "Claude Code settings"},
+		{"Edit", map[string]any{"file_path": home, "old_string": "Bash|Monitor", "new_string": "Nope"}, "Claude Code settings"},
+		{"MultiEdit", map[string]any{"file_path": home, "edits": []any{map[string]any{"old_string": `"1"`, "new_string": `"off"`}}}, "Claude Code settings"},
+		{"Write", map[string]any{"file_path": "/etc/claude-code/managed-settings.json", "content": `{}`}, "Claude Code settings"},
+		// row 10
+		{"MultiEdit", map[string]any{"file_path": "/work/run.py", "edits": []any{
+			map[string]any{"old_string": "a", "new_string": "b"},
+			map[string]any{"old_string": "c", "new_string": "os.environ['TGAC_READONLY'] = '0'"}}}, "TGAC_READONLY"},
+		{"NotebookEdit", map[string]any{"notebook_path": "/work/n.ipynb", "new_source": "import os\nos.environ['TGAC_READONLY'] = 'false'"}, "TGAC_READONLY"},
+		{"NotebookEdit", map[string]any{"notebook_path": "/work/n.ipynb", "new_source": "open(os.path.expanduser('~/.config/telegram-agent-cli/session.json'))"}, "data dir"},
+		{"Write", map[string]any{"file_path": "/work/Makefile", "content": "send:\n\tTGAC_READONLY=0 telegram-agent-cli send text\n"}, "TGAC_READONLY"},
+		{"Write", map[string]any{"file_path": "/work/t_test.go", "content": `os.Setenv("TGAC_READONLY", "0")`}, "TGAC_READONLY"},
+		{"Edit", map[string]any{"file_path": testHome + "/.zshrc", "old_string": "x", "new_string": "export TGAC_WATCHER_SESSION=abc"}, "TGAC_WATCHER_SESSION"},
+		{"Write", map[string]any{"file_path": "/work/fix.py", "content": "p = os.path.expanduser('~/.claude/settings.json')"}, "Claude Code settings"},
+
+		// silent
+		{"Write", map[string]any{"file_path": "/work/.claude/settings.local.json", "content": `{"permissions": {"allow": ["Bash(go test:*)"]}}`}, ""},
+		{"Edit", map[string]any{"file_path": home, "old_string": `"Bash(ls:*)"`, "new_string": `"Bash(ls:*)", "Bash(go test:*)"`}, ""},
+		{"Write", map[string]any{"file_path": "/work/README.md", "content": "TGAC_READONLY=0 telegram-agent-cli send text\n~/.config/telegram-agent-cli/session.json"}, ""},
+		{"Edit", map[string]any{"file_path": "/work/run.py", "old_string": "os.environ['TGAC_READONLY'] = '0'", "new_string": "pass"}, ""},
+		{"Write", map[string]any{"file_path": "/work/main.go", "content": "package main\nconst bin = \"telegram-agent-cli\"\n"}, ""},
+		{"Write", map[string]any{"file_path": "/work/config.json", "content": `{"settings": {"hooks": 1}}`}, ""},
+		{"Read", map[string]any{"file_path": home}, ""},
+	}
+	for _, c := range cases {
+		got := Evaluate(Input{ToolName: c.tool, ToolInput: c.input, Cwd: "/work"}, o)
+		switch {
+		case c.want == "" && got != "":
+			t.Errorf("%s %v = %q, want silent", c.tool, c.input, got)
+		case c.want != "" && !strings.Contains(got, c.want):
+			t.Errorf("%s %v = %q, want %q", c.tool, c.input, got, c.want)
+		}
+	}
+}
+
+// Row 2 in Bash: commands that rewrite a settings file.
+func TestReqSettingsBash(t *testing.T) {
+	checkReqs(t, settingsOptions(), []reqCase{
+		{`jq 'del(.hooks)' ~/.claude/settings.json > t && mv t ~/.claude/settings.json`, "Claude Code settings"},
+		{`echo '{}' > ~/.claude/settings.json`, "Claude Code settings"},
+		{`sed -i '' 's/"1"/"0"/' ~/.claude/settings.json`, "Claude Code settings"},
+		{`cp /tmp/s.json .claude/settings.local.json`, "Claude Code settings"},
+		{`rm -rf ~/.claude`, "Claude Code settings"},
+		{`mv ~/.claude ~/.claude.bak`, "Claude Code settings"},
+		{`ln -sf /tmp/s.json ~/.claude/settings.json`, "Claude Code settings"},
+		{`tee ~/.claude/settings.json < /tmp/s.json`, "Claude Code settings"},
+		{`git checkout -- .claude/settings.json`, "Claude Code settings"},
+		{`python3 -c "import json; p='/xhome/u/.claude/settings.json'"`, "Claude Code settings"},
+		{`rm ~/.claude/settings*`, "Claude Code settings"},
+		{`cd ~/.claude && echo '{}' > settings.json`, "Claude Code settings"},
+		// silent
+		{`cat ~/.claude/settings.json`, ""},
+		{`jq .hooks ~/.claude/settings.json`, ""},
+		{`grep -n TGAC ~/.claude/settings.json`, ""},
+		{`cp ~/.claude/settings.json /tmp/backup.json`, ""},
+		{`ls ~/.claude`, ""},
+		{`git diff .claude/settings.json`, ""},
+		{`cp agent.md ~/.claude/agents/`, ""},
+		{`sed -n 1,5p ~/.claude/settings.json`, ""},
+	})
+}

@@ -66,7 +66,9 @@ type Options struct {
 	WatcherEnvs []string
 	// XDGConfigHome is $XDG_CONFIG_HOME ("" = ~/.config).
 	XDGConfigHome string
-	Deadline      time.Duration // Run's time budget (DefaultDeadline if zero)
+	// ClaudeConfigDir is $CLAUDE_CONFIG_DIR; ~/.claude and every .claude dir are always protected.
+	ClaudeConfigDir string
+	Deadline        time.Duration // Run's time budget (DefaultDeadline if zero)
 }
 
 // DefaultOptions protects $TGAC_HOME (if set) and the default data dir.
@@ -84,6 +86,7 @@ func DefaultOptions() Options {
 	}
 	o.WatcherEnvs = WatcherEnvsFor(o.DataDirs)
 	o.XDGConfigHome = os.Getenv("XDG_CONFIG_HOME")
+	o.ClaudeConfigDir = os.Getenv("CLAUDE_CONFIG_DIR")
 	return o
 }
 

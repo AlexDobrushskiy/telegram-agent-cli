@@ -81,7 +81,14 @@ type settingsFile struct {
 
 func loadSettings(path string) (*settingsFile, error) {
 	f := &settingsFile{path: path, mode: 0o644, indent: "  ", newline: true, root: &object{}}
-	if real, err := filepath.EvalSymlinks(path); err == nil {
+	if st, err := os.Lstat(path); err == nil && st.Mode()&os.ModeSymlink != 0 {
+		real, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			// writing would replace the link with a file
+			return nil, fmt.Errorf("%s is a symlink whose target can't be resolved: %w", path, err)
+		}
+		f.path = real
+	} else if real, err := filepath.EvalSymlinks(path); err == nil {
 		f.path = real
 	}
 	b, err := os.ReadFile(f.path)
