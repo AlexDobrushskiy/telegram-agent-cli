@@ -48,4 +48,4 @@ changelog:
       - "^Merge "
 
 release:
-  draft: true
+  draft: false
