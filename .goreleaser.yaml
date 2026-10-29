@@ -33,6 +33,7 @@ archives:
       - CHANGELOG.md
       - SECURITY.md
       - skills/**/*
+      - docs/*.md
 
 checksum:
   name_template: checksums.txt

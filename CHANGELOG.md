@@ -3,6 +3,12 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] - 2026-10-29
+
+### Changed
+
+- Shorter README; details moved to `docs/safety.md`, `docs/watchers.md` and `docs/reference.md` (also shipped in release archives).
+
 ## [0.1.1] - 2026-10-29
 
 ### Added
