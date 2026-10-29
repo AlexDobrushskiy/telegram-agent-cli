@@ -20,6 +20,7 @@ e2e:
 vet:
 	go vet ./...
 	go vet -tags e2e ./e2e/
+	go vet -tags demo ./cmd/telegram-agent-cli/
 
 fmt:
 	gofmt -w .

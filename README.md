@@ -8,6 +8,10 @@ $ telegram-agent-cli messages search "invoice" --limit 5
 {"schema_version":"1","ok":true,"data":{"query":"invoice","messages":[…]}}
 ```
 
+![Demo: chats, search and mentions as JSON; a refused send; the hook asking before a send; a watcher dry-run](docs/demo.gif)
+
+<sub>Recorded against a fictional demo account (`-tags demo`), not a real one.</sub>
+
 ## Why
 
 Agents (Claude Code, Codex, scripts) are useful for "what did people write me today", "find that
@@ -413,6 +417,12 @@ For other agent harnesses, the hook reads Claude Code's PreToolUse JSON on stdin
 (`{"tool_name":"Bash","tool_input":{"command":"…"},"cwd":"…"}`) and prints
 `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"…"}}`
 or nothing; it always exits 0. `hook claude-pretooluse --help` prints its own help.
+
+## Development
+
+`make build`, `make test`, `make lint`. Re-record the demo GIF with `vhs demo/demo.tape` (needs
+[VHS](https://github.com/charmbracelet/vhs) and `jq`); it builds with `-tags demo`, which swaps
+Telegram for an in-memory account of fictional chats, and writes `docs/demo.gif`.
 
 ## License
 

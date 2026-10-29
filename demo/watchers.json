@@ -1,0 +1,12 @@
+{
+  "helper": {
+    "session": "demo-session-7f3a",
+    "chats": {"5550102": "Mateo, friend visiting Lisbon"},
+    "scope": "listed",
+    "max_chars": 300,
+    "per_hour": 20,
+    "per_chat_seconds": 20,
+    "backoff_minutes": 15,
+    "approved": "Robin, for the demo"
+  }
+}
