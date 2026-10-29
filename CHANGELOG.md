@@ -3,6 +3,17 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-10-29
+
+### Added
+
+- README demo (recorded with a fictional demo backend, build tag `demo`).
+
+### Fixed
+
+- Releases are published, not left as drafts.
+- `auth qr --timeout`, `messages wait-new --timeout` and `--interval` accept seconds or a duration (`300`, `5m`).
+
 ## [0.1.0] - 2026-10-29
 
 ### Added
