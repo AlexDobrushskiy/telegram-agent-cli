@@ -9,6 +9,7 @@ All notable changes to this project are documented here. The format follows
 
 - `brew install AlexDobrushskiy/tap/telegram-agent-cli` (Homebrew cask, published on each release).
 - `install.sh`: one-line install of the latest release on Linux or macOS, with checksum check.
+- `docs/agent-setup.md`: a setup guide an agent can follow; the README quick start is one prompt.
 
 ## [0.1.2] - 2026-10-29
 

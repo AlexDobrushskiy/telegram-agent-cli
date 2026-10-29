@@ -28,28 +28,14 @@ Other ways (Go, manual download): [docs/reference.md](docs/reference.md#install)
 
 ## Quick start
 
-Run these yourself in a terminal, with your phone signed in to Telegram.
+Paste this into your agent (Claude Code, Codex, …):
 
-1. **Get API keys.** At <https://my.telegram.org> → **API development tools**, create an app (any
-   name). You get an `api_id` and an `api_hash`.
-2. **Save them.** Use your own API ID and phone number, then paste the `api_hash` at the hidden
-   prompt:
-   ```sh
-   TGAC_READONLY=0 telegram-agent-cli auth init --api-id 1234567 --phone +15550000000
-   ```
-3. **Log in.** Run this, then on your phone open Telegram → **Settings → Devices → Link Desktop
-   Device** and scan the QR code. If you use two-step verification, type the password when asked.
-   ```sh
-   TGAC_READONLY=0 telegram-agent-cli auth qr
-   ```
-4. **Check:** `telegram-agent-cli doctor` should show `"authorized":true`.
-5. **Claude Code only:** run `TGAC_READONLY=0 telegram-agent-cli hook install` to add the guard
-   hook. Optionally copy the [`skills/telegram-agent-cli`](skills/telegram-agent-cli/) directory
-   into `~/.claude/skills/`.
+> Set up telegram-agent-cli for me by following
+> https://github.com/AlexDobrushskiy/telegram-agent-cli/blob/main/docs/agent-setup.md
 
-`TGAC_READONLY=0` switches writes on for that one command. Without it, the tool refuses anything
-that changes your account. Other ways to log in (a login code, or importing a Telethon session) are
-in the [setup reference](docs/reference.md#setup).
+It installs the tool, walks you through getting API keys and scanning a login QR code, and adds the
+guard hook. You run the two login commands in your own terminal, so your keys never pass through
+the agent. Prefer doing it by hand? See [manual setup](docs/reference.md#setup).
 
 ## Use
 
