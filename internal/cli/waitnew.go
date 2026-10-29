@@ -25,7 +25,7 @@ func (a *App) messagesWaitNewCmd() *cobra.Command {
 	var (
 		state, chats, since   string
 		dms, groups, mentions bool
-		timeout, interval     int
+		timeout, interval     time.Duration
 	)
 	c := &cobra.Command{
 		Use:   "wait-new",
@@ -43,8 +43,8 @@ func (a *App) messagesWaitNewCmd() *cobra.Command {
 			if strings.TrimSpace(state) == "" {
 				return output.Usage("--state is required")
 			}
-			if timeout < 0 || interval < minWaitInterval {
-				return output.Usage("--timeout must be >= 0 and --interval >= %d", minWaitInterval)
+			if timeout < 0 || interval < minWaitInterval*time.Second {
+				return output.Usage("--timeout must be >= 0 and --interval >= %ds", minWaitInterval)
 			}
 			sinceT, err := parseDate("since", since)
 			if err != nil {
@@ -65,7 +65,7 @@ func (a *App) messagesWaitNewCmd() *cobra.Command {
 			if err != nil {
 				return output.Usage("--state: %v", err)
 			}
-			return a.waitNew(c.Context(), path, f, sinceT, time.Duration(timeout)*time.Second, time.Duration(interval)*time.Second)
+			return a.waitNew(c.Context(), path, f, sinceT, timeout, interval)
 		},
 	}
 	fl := c.Flags()
@@ -74,8 +74,8 @@ func (a *App) messagesWaitNewCmd() *cobra.Command {
 	fl.BoolVar(&dms, "dms", false, "1:1 chats")
 	fl.BoolVar(&groups, "groups", false, "groups and supergroups")
 	fl.BoolVar(&mentions, "mentions", false, "group messages that mention or reply to you")
-	fl.IntVar(&timeout, "timeout", 600, "seconds to wait (0 = poll once)")
-	fl.IntVar(&interval, "interval", 30, "seconds between polls")
+	fl.Var(newDurFlag(&timeout, 600*time.Second), "timeout", "how long to wait: seconds or a duration (600, 10m; 0 = poll once)")
+	fl.Var(newDurFlag(&interval, 30*time.Second), "interval", "time between polls: seconds or a duration (30, 1m)")
 	fl.StringVar(&since, "since", "", "first run only: also return messages after this ISO date (UTC)")
 	_ = c.MarkFlagRequired("state")
 	return c

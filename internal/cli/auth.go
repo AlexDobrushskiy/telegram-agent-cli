@@ -289,7 +289,7 @@ func (a *App) authQRCmd() *cobra.Command {
 			return a.emit(out)
 		},
 	}
-	c.Flags().DurationVar(&timeout, "timeout", 180*time.Second, "give up after this long")
+	c.Flags().Var(newDurFlag(&timeout, 180*time.Second), "timeout", "give up after this long (seconds or a duration: 300, 5m)")
 	return c
 }
 
