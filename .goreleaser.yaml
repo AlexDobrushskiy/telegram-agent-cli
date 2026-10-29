@@ -50,3 +50,27 @@ changelog:
 
 release:
   draft: false
+
+homebrew_casks:
+  - name: telegram-agent-cli
+    binaries: [telegram-agent-cli]
+    homepage: https://github.com/AlexDobrushskiy/telegram-agent-cli
+    description: Telegram user-account CLI for AI agents, read-only by default
+    license: MIT
+    commit_author:
+      name: telegram-agent-cli release
+      email: noreply@github.com
+    commit_msg_template: "telegram-agent-cli {{ .Tag }}"
+    # The binaries are not notarized; clear the download quarantine so macOS runs them.
+    hooks:
+      post:
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/telegram-agent-cli"]
+          end
+    repository:
+      owner: AlexDobrushskiy
+      name: homebrew-tap
+      git:
+        url: git@github.com:AlexDobrushskiy/homebrew-tap.git
+        private_key: "{{ .Env.HOMEBREW_TAP_SSH_KEY }}"

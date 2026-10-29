@@ -3,6 +3,13 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] - 2026-10-29
+
+### Added
+
+- `brew install AlexDobrushskiy/tap/telegram-agent-cli` (Homebrew cask, published on each release).
+- `install.sh`: one-line install of the latest release on Linux or macOS, with checksum check.
+
 ## [0.1.2] - 2026-10-29
 
 ### Changed

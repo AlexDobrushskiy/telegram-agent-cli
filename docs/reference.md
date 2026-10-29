@@ -1,5 +1,15 @@
 # Reference
 
+## Install
+
+| How | Command |
+|---|---|
+| Homebrew (macOS) | `brew install AlexDobrushskiy/tap/telegram-agent-cli` |
+| Script (Linux, macOS) | `curl -fsSL https://raw.githubusercontent.com/AlexDobrushskiy/telegram-agent-cli/main/install.sh \| sh` installs the latest release to `~/.local/bin` after checking its checksum. `VERSION=0.1.3` pins a version, `INSTALL_DIR=…` changes the target |
+| Go 1.25+ | `go install github.com/AlexDobrushskiy/telegram-agent-cli/cmd/telegram-agent-cli@latest` (binary in `$(go env GOPATH)/bin`) |
+| Manual | download an archive for your OS/CPU from [releases](https://github.com/AlexDobrushskiy/telegram-agent-cli/releases), check it against `checksums.txt`, put `telegram-agent-cli` on your `PATH` |
+| Source | `make build` writes `bin/telegram-agent-cli` |
+
 ## Setup
 
 Setup changes your account and settings, so each step that writes runs with writes switched on for

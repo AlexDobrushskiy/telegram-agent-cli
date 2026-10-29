@@ -12,16 +12,19 @@ JSON. Agents such as Claude Code or Codex can use it to answer "What did people 
 
 ## Install
 
-With **Go 1.25 or newer**:
+macOS:
 
 ```sh
-go install github.com/AlexDobrushskiy/telegram-agent-cli/cmd/telegram-agent-cli@latest
-telegram-agent-cli version
+brew install AlexDobrushskiy/tap/telegram-agent-cli
 ```
 
-If the command isn't found, add `$(go env GOPATH)/bin` to your `PATH`. Or download a macOS or Linux
-binary from [releases](https://github.com/AlexDobrushskiy/telegram-agent-cli/releases) (no Go
-needed) and put it on your `PATH`.
+Linux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/AlexDobrushskiy/telegram-agent-cli/main/install.sh | sh
+```
+
+Other ways (Go, manual download): [docs/reference.md](docs/reference.md#install).
 
 ## Quick start
 
