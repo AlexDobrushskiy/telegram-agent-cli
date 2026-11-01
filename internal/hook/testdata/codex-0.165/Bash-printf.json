@@ -1,0 +1,14 @@
+{
+ "session_id": "01a19721-6ab2-7963-a1b0-09d4770ff84b",
+ "turn_id": "01a19721-6c7d-7743-b3f9-61720dc23153",
+ "transcript_path": "/xhome/u/.codex/sessions/2026/11/01/rollout-2026-11-01T12-41-52-01a19721-6ab2-7963-a1b0-09d4770ff84b.jsonl",
+ "cwd": "/work",
+ "hook_event_name": "PreToolUse",
+ "model": "gpt-6-astra",
+ "permission_mode": "bypassPermissions",
+ "tool_name": "Bash",
+ "tool_input": {
+  "command": "printf '%s\\n' a b"
+ },
+ "tool_use_id": "exec-07e1af11-06fc-4797-a7e1-0f5486efe457"
+}

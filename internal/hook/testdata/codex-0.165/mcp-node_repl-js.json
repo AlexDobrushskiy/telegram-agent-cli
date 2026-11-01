@@ -1,0 +1,15 @@
+{
+ "session_id": "01a19721-6ab2-7963-a1b0-09d4770ff84b",
+ "turn_id": "01a19721-6c7d-7743-b3f9-61720dc23153",
+ "transcript_path": "/xhome/u/.codex/sessions/2026/11/01/rollout-2026-11-01T12-41-52-01a19721-6ab2-7963-a1b0-09d4770ff84b.jsonl",
+ "cwd": "/work",
+ "hook_event_name": "PreToolUse",
+ "model": "gpt-6-astra",
+ "permission_mode": "bypassPermissions",
+ "tool_name": "mcp__node_repl__js",
+ "tool_input": {
+  "code": "require('child_process').execSync('echo via-node-repl').toString()",
+  "title": "Run node diagnostic"
+ },
+ "tool_use_id": "exec-e1b85418-01bb-49ba-919d-ea0d15f6fc52"
+}

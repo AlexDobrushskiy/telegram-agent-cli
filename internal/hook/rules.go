@@ -76,7 +76,10 @@ type Options struct {
 	E2EAllowed []string
 	// CodexHome is $CODEX_HOME; hooks.json/config.toml there and in every .codex dir are protected.
 	CodexHome string
-	Deadline  time.Duration // Run's time budget (DefaultDeadline if zero)
+	// TerminalStdin: a command's stdin may be a terminal that another tool types
+	// into unchecked (Codex's write_stdin), so a shell or REPL reading it is asked about.
+	TerminalStdin bool
+	Deadline      time.Duration // Run's time budget (DefaultDeadline if zero)
 }
 
 // DefaultOptions protects $TGAC_HOME (if set) and the default data dir.
@@ -160,6 +163,16 @@ func CheckBash(cmd string, o Options) []string {
 	s := newScanner(o)
 	text := s.scanTop(cmd)
 	s.rawRules(text)
+	return s.reasons.list
+}
+
+// CheckCode returns why code a tool runs (a JavaScript REPL, a run-code tool)
+// needs the owner's OK, with the interpreter-code rules (nil = let it run).
+func CheckCode(code string, o Options) []string {
+	s := newScanner(o)
+	s.code(code, ctx{})
+	s.finish(code)
+	s.rawRules(code)
 	return s.reasons.list
 }
 

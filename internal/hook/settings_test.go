@@ -55,6 +55,17 @@ const freshInstall = `{
             "onFailure": "block"
           }
         ]
+      },
+      {
+        "matcher": "mcp__.*|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/tools/bin/telegram-agent-cli hook claude-pretooluse",
+            "timeout": 10,
+            "onFailure": "block"
+          }
+        ]
       }
     ]
   }
@@ -78,7 +89,7 @@ func TestInstallFresh(t *testing.T) {
 			strings.HasSuffix(first, "\n") != (initial != "{}") {
 			t.Errorf("initial %q: got\n%q", initial, first)
 		}
-		if !r.Changed || len(r.Actions) != 3 || r.Diff == "" {
+		if !r.Changed || len(r.Actions) != 4 || r.Diff == "" {
 			t.Errorf("result %+v", r)
 		}
 		if (initial == "") != (r.Backup == "") {
@@ -188,6 +199,17 @@ func TestInstallPreserves(t *testing.T) {
                         "onFailure": "block"
                     }
                 ]
+            },
+            {
+                "matcher": "mcp__.*|PowerShell",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "/opt/tools/bin/telegram-agent-cli hook claude-pretooluse",
+                        "timeout": 10,
+                        "onFailure": "block"
+                    }
+                ]
             }
         ],
         "PostToolUse": [
@@ -227,7 +249,7 @@ func TestInstallPreserves(t *testing.T) {
 		strings.Contains(after, "NotebookEdit") || !strings.Contains(after, `"OTHER": "x"`) {
 		t.Errorf("after uninstall:\n%s", after)
 	}
-	if len(r.Actions) != 3 || r.Backup == "" {
+	if len(r.Actions) != 4 || r.Backup == "" {
 		t.Errorf("uninstall result %+v", r)
 	}
 }
@@ -291,8 +313,8 @@ func TestInstallUpdatesAndDedupes(t *testing.T) {
 	}
 	got := read(t, p)
 	cmd := `"'/new place/telegram-agent-cli' hook claude-pretooluse"`
-	if n := strings.Count(got, "hook claude-pretooluse"); n != 2 || strings.Count(got, cmd) != 2 {
-		t.Errorf("want exactly 2 guard hooks with the new path, got %d:\n%s", n, got)
+	if n := strings.Count(got, "hook claude-pretooluse"); n != len(Matchers) || strings.Count(got, cmd) != len(Matchers) {
+		t.Errorf("want exactly %d guard hooks with the new path, got %d:\n%s", len(Matchers), n, got)
 	}
 	if !strings.Contains(got, "keep-me") || strings.Contains(got, `"Read|Edit|Write"`) {
 		t.Errorf("stale entries:\n%s", got)
@@ -317,7 +339,8 @@ func TestInstallAddsTimeoutAndOnFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := read(t, p)
-	if len(r.Actions) != 2 || strings.Count(got, `"timeout": 10`) != 2 || strings.Count(got, `"onFailure": "block"`) != 2 {
+	// two entries updated, the MCP/PowerShell entry added
+	if len(r.Actions) != 3 || strings.Count(got, `"timeout": 10`) != 3 || strings.Count(got, `"onFailure": "block"`) != 3 {
 		t.Errorf("actions %v\n%s", r.Actions, got)
 	}
 }
@@ -330,7 +353,7 @@ func TestInstallAppendsToExistingEntry(t *testing.T) {
 	}
 	got := read(t, p)
 	if strings.Count(got, `"matcher": "Bash|Monitor"`) != 1 || !strings.Contains(got, `"command": "other"`) ||
-		strings.Count(got, "hook claude-pretooluse") != 2 {
+		strings.Count(got, "hook claude-pretooluse") != len(Matchers) {
 		t.Errorf("got\n%s", got)
 	}
 }
@@ -345,7 +368,7 @@ func TestInstallMigratesOldBashMatcher(t *testing.T) {
 	}
 	got := read(t, p)
 	if !strings.Contains(got, `"matcher": "Bash"`) || !strings.Contains(got, `"matcher": "Bash|Monitor"`) ||
-		strings.Count(got, "hook claude-pretooluse") != 2 || !strings.Contains(got, `"command": "other"`) {
+		strings.Count(got, "hook claude-pretooluse") != len(Matchers) || !strings.Contains(got, `"command": "other"`) {
 		t.Errorf("got\n%s", got)
 	}
 }

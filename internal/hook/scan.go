@@ -135,6 +135,12 @@ func (s *scanner) scanTop(cmd string) string {
 	}
 	s.script(lx, ctx{})
 	text := blank(cmd, s.inert)
+	s.finish(text)
+	return text
+}
+
+// finish adds the hidden and conditional reasons that apply to text.
+func (s *scanner) finish(text string) {
 	if len(s.hiddenRs) > 0 {
 		related := s.related(text)
 		for _, h := range s.hiddenRs {
@@ -148,7 +154,6 @@ func (s *scanner) scanTop(cmd string) string {
 			s.reasons.add(r)
 		}
 	}
-	return text
 }
 
 func blank(s string, ranges [][2]int) string {
@@ -431,7 +436,7 @@ func (s *scanner) argv(words []token, cmd *command, c ctx) {
 	case name == "hyperfine":
 		s.hyperfine(args, c)
 	case name == "tmux":
-		s.tmux(args, c)
+		s.tmux(args, cmd, c)
 	case name == "alias":
 		for _, a := range args {
 			if mentionRe.MatchString(a.text) {
@@ -514,8 +519,14 @@ func (s *scanner) shell(args []token, cmd *command, c ctx) {
 		}
 		return
 	}
+	if !cflag {
+		s.terminalStdin("sh", args, cmd, nil)
+	}
 	s.stdinCode(cmd, c, true)
 }
+
+// sshNoShell are ssh options that open no remote shell.
+var sshNoShell = set("-N", "-W", "-O", "-G", "-Q")
 
 // pipedIn analyses what a command reads from the pipe: the literal text of
 // echo/printf, the files or heredoc of cat. Anything else is unseen: ask.
@@ -601,6 +612,7 @@ func (s *scanner) ssh(args []token, cmd *command, c ctx) {
 		}
 	}
 	if host {
+		s.terminalStdin("ssh", args, cmd, sshNoShell)
 		s.stdinCode(cmd, c, true)
 	}
 }

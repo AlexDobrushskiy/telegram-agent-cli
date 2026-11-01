@@ -14,7 +14,16 @@ All notable changes to this project are documented here. The format follows
   `e2e.allowed_chats` (`e2e allow`), work in read-only mode through a per-bot guard grant, and need
   no hook prompt; other targets exit 8, waits that time out exit 9.
 - `hook codex-pretooluse`: the guard for Codex (denies where Claude Code would ask); Codex hook
-  configs are protected like Claude Code settings.
+  configs are protected like Claude Code settings. It checks every shell shape Codex sends and
+  denies interactive shells/REPLs on the terminal (Codex's `write_stdin` is not hooked).
+
+### Changed
+
+- The hooks fail closed: a payload they can't read, or a shell tool without a readable command,
+  gets a decision instead of passing. `exec_command`/`cmd`, argv arrays and MCP `command`/`cmd`/
+  `code` fields get the Bash or interpreter-code checks. `hook install` adds a third matcher,
+  `mcp__.*|PowerShell`; run it again to pick it up.
+- A shell or interpreter reading a script through `<` (`bash < x.sh`) gets the script checked.
 
 ## [0.1.3] - 2026-10-29
 

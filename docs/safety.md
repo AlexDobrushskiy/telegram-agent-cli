@@ -134,12 +134,33 @@ in read-only mode, so unattended test agents can use it, and it is fenced like t
 
 `telegram-agent-cli hook codex-pretooluse` runs the same checks for Codex's `PreToolUse` hook.
 Codex has no "ask" (it treats one as a hook failure and runs the call), so the decision is `deny`
-with the reason; run a denied command yourself, outside the agent. For tools Claude Code doesn't
-have (`apply_patch`, MCP calls) it denies input that names a data dir, a Claude settings file or a
-Codex hook config, and patches whose files (resolved against the cwd) are one. Those configs
-(`hooks.json` and `config.toml` in any `.codex` dir and in `$CODEX_HOME`) are protected like Claude
-Code settings, including from interpreter code (`python3 -c 'open(...)'`) that writes them. Add it to `~/.codex/hooks.json`, then
-approve it with `/hooks`:
+with the reason; run a denied command yourself, outside the agent.
+
+What Codex sends (codex-cli 0.165, captured from `codex exec` and the TUI): every shell call
+(`exec_command`, also from code mode) arrives as `{"tool_name":"Bash","tool_input":{"command":"…"}}`;
+a patch as `{"tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch…"}}`; an MCP call
+as `mcp__<server>__<tool>` with its JSON arguments, or the raw argument string when they don't
+parse. `write_stdin` (typing into a running command) and code mode's `wait` send no `PreToolUse`.
+So the Codex hook:
+
+- applies the Bash checks to every shell shape: `Bash`, `exec_command`/`functions.exec_command`
+  with `cmd`, `shell`/`local_shell`/`container.exec` with an argv array, and a `command`/`cmd`
+  field of any other tool. `code`/`script` fields (node_repl's `js` tool) get the
+  interpreter-code checks;
+- denies a shell, REPL, `ssh HOST` or `tmux` session started on the terminal (`zsh`, `bash -i`,
+  `python3`, `node`, `tmux new`), since what is typed into it later is never checked. Pipes,
+  heredocs, `<` redirects, `-c`, scripts, `--version` and `ssh -N` pass;
+- for `apply_patch` and MCP calls, denies input that names a data dir, a Claude settings file or a
+  Codex hook config, patches whose files (resolved against the cwd) are one, and any other input
+  of an unknown tool that names the binary or a `TGAC_` variable (`spawn_agent` and other
+  agent-to-agent text excepted: those agents run under the same hook);
+- denies a payload it can't read (not JSON, no tool name, a shell tool without a string or argv
+  command), and a call it fails to check.
+
+Codex hook configs (`hooks.json` and `config.toml` in any `.codex` dir and in `$CODEX_HOME`) are
+protected like Claude Code settings, including from interpreter code (`python3 -c 'open(...)'`)
+that writes them. Add the hook to `~/.codex/hooks.json` with matcher `.*` (it must see every tool),
+then approve it with `/hooks`:
 
 ```json
 {"hooks": {"PreToolUse": [{"matcher": ".*", "hooks": [
@@ -153,8 +174,10 @@ Set `TGAC_READONLY=1` in Codex's shell environment as well (`[shell_environment_
 ## Claude Code hook details
 
 `hook install` edits `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`, or
-`--settings PATH`). It sets `env.TGAC_READONLY` to `"1"` and adds two `PreToolUse` entries, matcher
-`Bash|Monitor` and matcher `Read|Edit|Write|MultiEdit|NotebookEdit|Grep`, each running
+`--settings PATH`). It sets `env.TGAC_READONLY` to `"1"` and adds three `PreToolUse` entries, matcher
+`Bash|Monitor`, matcher `Read|Edit|Write|MultiEdit|NotebookEdit|Grep` and matcher
+`mcp__.*|PowerShell` (MCP tools that carry a `command`, `cmd`, `code` or `script` field get the
+Bash or interpreter-code checks; other MCP calls pass), each running
 `<absolute path of this binary> hook claude-pretooluse` with `"timeout": 10` and
 `"onFailure": "block"`. That fails closed: if the hook cannot start, crashes or times out, the tool
 call is blocked. `onFailure` needs Claude Code 2.1.295 or later; older versions ignore it and let the
@@ -172,4 +195,6 @@ settings. Use `--binary PATH` when the binary is reached through a package manag
 For other agent harnesses, the hook reads Claude Code's PreToolUse JSON on stdin
 (`{"tool_name":"Bash","tool_input":{"command":"…"},"cwd":"…"}`) and prints
 `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"…"}}`
-or nothing; it always exits 0. `hook claude-pretooluse --help` prints its own help.
+or nothing; it always exits 0. A payload it can't read gets "ask" too (fail closed), as does a
+shell tool (`Bash`, `exec_command`, `shell`…) whose command isn't a string or an argv array.
+`hook claude-pretooluse --help` prints its own help.

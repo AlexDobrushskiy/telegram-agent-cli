@@ -21,7 +21,8 @@ func TestHookPreToolUse(t *testing.T) {
 		`{"tool_name":"Bash","tool_input":{"command":"telegram-agent-cli chats list"}}`:                      false,
 		`{"tool_name":"Read","tool_input":{"file_path":"` + session + `"}}`:                                  true,
 		`{"tool_name":"Bash","tool_input":{"command":"cat ` + session + `"}}`:                                true,
-		`garbage`: false,
+		// a payload the guard can't read might run anything: fail closed
+		`garbage`: true,
 	}
 	for payload, ask := range cases {
 		out := &bytes.Buffer{}
@@ -43,12 +44,22 @@ func TestHookPreToolUse(t *testing.T) {
 		t.Errorf("--help: exit %d out %q", code, out0.String())
 	}
 
-	// unexpected args never fail the hook
+	// unexpected args never fail the hook; they are ignored and the payload decides
+	for _, cmd := range []string{"claude-pretooluse", "codex-pretooluse"} {
+		out := &bytes.Buffer{}
+		h.app.Stdout = out
+		h.app.Stdin = strings.NewReader(`{"tool_name":"Bash","tool_input":{"command":"ls"}}`)
+		if code := h.app.Execute(context.Background(), []string{"hook", cmd, "--bogus", "x"}); code != 0 || out.Len() != 0 {
+			t.Errorf("%s bad args: exit %d out %q", cmd, code, out.String())
+		}
+	}
+	// e2e r1 row 11 through the command: Codex-native envelopes are denied
 	out := &bytes.Buffer{}
 	h.app.Stdout = out
-	h.app.Stdin = strings.NewReader("")
-	if code := h.app.Execute(context.Background(), []string{"hook", "claude-pretooluse", "--bogus", "x"}); code != 0 || out.Len() != 0 {
-		t.Errorf("bad args: exit %d out %q", code, out.String())
+	h.app.Stdin = strings.NewReader(`{"tool_name":"exec_command","tool_input":{"cmd":"telegram-agent-cli e2e send text x --chat me"}}`)
+	if code := h.app.Execute(context.Background(), []string{"hook", "codex-pretooluse"}); code != 0 ||
+		!strings.Contains(out.String(), `"permissionDecision":"deny"`) {
+		t.Errorf("codex exec_command: exit %d out %q", code, out.String())
 	}
 }
 

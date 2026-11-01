@@ -15,8 +15,9 @@ import (
 // HookArgs is what Claude Code runs after the binary path.
 const HookArgs = "hook claude-pretooluse"
 
-// Matchers are the PreToolUse matchers the guard is installed under.
-var Matchers = []string{"Bash|Monitor", "Read|Edit|Write|MultiEdit|NotebookEdit|Grep"}
+// Matchers are the PreToolUse matchers the guard is installed under. The last
+// covers tools that can carry a command or code (MCP tools, Windows PowerShell).
+var Matchers = []string{"Bash|Monitor", "Read|Edit|Write|MultiEdit|NotebookEdit|Grep", "mcp__.*|PowerShell"}
 
 // SettingsPath is $CLAUDE_CONFIG_DIR/settings.json or ~/.claude/settings.json.
 func SettingsPath() (string, error) {

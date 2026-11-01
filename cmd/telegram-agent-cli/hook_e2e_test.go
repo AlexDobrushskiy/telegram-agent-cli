@@ -78,7 +78,7 @@ func TestHookEndToEnd(t *testing.T) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		t.Fatal(err)
 	}
-	if s.Env["TGAC_READONLY"] != "1" || len(s.Hooks.PreToolUse) != 2 {
+	if s.Env["TGAC_READONLY"] != "1" || len(s.Hooks.PreToolUse) != 3 {
 		t.Fatalf("settings: %s", b)
 	}
 	cmds := map[string]string{}
@@ -97,7 +97,11 @@ func TestHookEndToEnd(t *testing.T) {
 		{"Bash|Monitor", `{"tool_name":"Bash","tool_input":{"command":"git commit -m \"telegram-agent-cli send\""}}`, false},
 		{"Read|Edit|Write|MultiEdit|NotebookEdit|Grep", `{"tool_name":"Read","tool_input":{"file_path":"` + session + `"}}`, true},
 		{"Read|Edit|Write|MultiEdit|NotebookEdit|Grep", `{"tool_name":"Read","tool_input":{"file_path":"/etc/hosts"}}`, false},
-		{"Bash|Monitor", `not json`, false},
+		{"Bash|Monitor", `not json`, true}, // unreadable: fail closed
+		{"mcp__.*|PowerShell", `{"tool_name":"mcp__node_repl__js","tool_input":{"code":"execSync('telegram-agent-cli send text --chat 1')"}}`, true},
+		{"mcp__.*|PowerShell", `{"tool_name":"mcp__runner__run","tool_input":{"cmd":"telegram-agent-cli send text --chat 1"}}`, true},
+		{"mcp__.*|PowerShell", `{"tool_name":"PowerShell","tool_input":{"command":"telegram-agent-cli send text --chat 1"}}`, true},
+		{"mcp__.*|PowerShell", `{"tool_name":"mcp__pw-lane__browser_navigate","tool_input":{"url":"https://example.com"}}`, false},
 		{"Bash|Monitor", `{"tool_name":"Monitor","tool_input":{"command":"telegram-agent-cli send text --chat 1 --message hi"}}`, true},
 		{"Bash|Monitor", `{"tool_name":"Monitor","tool_input":{"command":"tail -f app.log"}}`, false},
 	} {

@@ -241,6 +241,7 @@ func (s *scanner) interpreter(name string, args []token, cmd *command, c ctx) {
 		case t == "run" && (name == "deno" || name == "bun"):
 			continue
 		case t == "-":
+			s.terminalStdin(name, nil, cmd, nil)
 			s.stdinCode(cmd, c, false) // code on stdin, the rest is argv
 			return
 		case awk && t == "-f":
@@ -281,6 +282,7 @@ func (s *scanner) interpreter(name string, args []token, cmd *command, c ctx) {
 		return
 	}
 	if !sawCode && !sawScript {
+		s.terminalStdin(name, args, cmd, nil)
 		s.stdinCode(cmd, c, false)
 	}
 }
@@ -306,6 +308,44 @@ func (s *scanner) stdinCode(cmd *command, c ctx, asShell bool) {
 	if len(cmd.heredocs) == 0 && len(cmd.herestrings) == 0 && cmd.pipeIn {
 		s.pipedIn(cmd, c, run)
 	}
+	mode := modeText
+	if asShell {
+		mode = modeShell
+	}
+	for _, r := range cmd.inRedirs {
+		switch {
+		case r.text == "-" || allDigits(r.text):
+			// <&3, <&-: a file descriptor
+		case r.dynamic || r.glob:
+			s.hidden(reasonUnseen+" ("+r.text+")", s.subsDecode(r.subs))
+		default:
+			s.file(r.text, mode, c)
+		}
+	}
+}
+
+const reasonTerminal = "starts a shell or interpreter that reads commands from the terminal; " +
+	"Codex types into it with write_stdin, which the hook never sees"
+
+// infoFlags make a shell, interpreter or ssh print something and exit.
+var infoFlags = set("--version", "-version", "--help", "-V", "-h")
+
+// versionV are the interpreters whose -v prints the version and exits.
+var versionV = set("node", "deno", "bun", "php", "perl")
+
+// terminalStdin asks about a shell, REPL or remote shell reading the terminal,
+// when Options.TerminalStdin says another tool can type into it unchecked.
+func (s *scanner) terminalStdin(name string, args []token, cmd *command, extra map[string]bool) {
+	if !s.o.TerminalStdin || cmd == nil || cmd.pipeIn ||
+		len(cmd.heredocs)+len(cmd.herestrings)+len(cmd.inRedirs) > 0 {
+		return
+	}
+	for _, a := range args {
+		if infoFlags[a.text] || extra[a.text] || a.text == "-v" && versionV[name] {
+			return
+		}
+	}
+	s.reasons.add(reasonTerminal)
 }
 
 func errorsIsNotExist(err error) bool { return errors.Is(err, fs.ErrNotExist) }

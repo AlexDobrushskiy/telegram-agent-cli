@@ -174,6 +174,11 @@ never mark messages as read.
 `hook claude-pretooluse` (the hook itself, reads stdin) · `hook codex-pretooluse` (the same for Codex: denies instead of asking) · `hook install [--settings PATH] [--binary PATH] [--dry-run]` ·
 `hook uninstall [--settings PATH] [--dry-run]`.
 
+Both hooks decide on every shell shape (`Bash`, Codex's `exec_command`/`cmd`, argv arrays, a
+`command`/`cmd`/`code` field of an MCP tool) and fail closed on a payload they can't read. The Codex
+hook also denies an interactive shell or REPL on the terminal, because Codex's `write_stdin` is not
+hooked. Details: [safety.md](safety.md#codex).
+
 ## JSON output
 
 Success:

@@ -22,6 +22,7 @@ var testFiles = map[string]string{
 	"/work/scripts/ok.sh":   "#!/bin/sh\ntelegram-agent-cli me\n",
 	"/work/scripts/bad.sh":  "#!/bin/sh\ntelegram-agent-cli send text --chat 1 --message hi\n",
 	"/work/scripts/bad":     "#!/usr/bin/env bash\nset -e\ntelegram-agent-cli auth logout\n",
+	"/work/scripts/bad.py":  "import subprocess\nsubprocess.run(['telegram-agent-cli', 'send', 'text', '--chat', '1'])\n",
 	"/work/scripts/read.py": "import subprocess\nsubprocess.run(['telegram-agent-cli', 'me'])\n",
 	"/work/scripts/raw.py":  "from telethon.sync import TelegramClient\nTelegramClient('x.session', 1, 'h')\n",
 	"/work/scripts/home.py": "import os\nprint(os.path.expanduser('~/.config/telegram-agent-cli/session.json'))\n",
@@ -403,14 +404,7 @@ func TestRun(t *testing.T) {
 		`{"tool_name":"Monitor","tool_input":{"command":"tail -f app.log"}}`,
 		`{"tool_name":"Monitor","tool_input":{"ws":"wss://example.com"}}`,
 		`{"tool_name":"Bash","tool_input":{"command":"telegram-agent-cli chats list"}}`,
-		`{"tool_name":"Bash","tool_input":{"command":42}}`,
-		`{"tool_name":"Bash","tool_input":null}`,
-		`{"tool_name":"Bash"}`,
 		`{"tool_name":"WebFetch","tool_input":{"url":"https://example.com"}}`,
-		`{"tool_name":"Read","tool_input":{"file_path":["x"]}}`,
-		`not json`,
-		``,
-		`[]`,
 		`{"tool_name":"Bash","tool_input":{"command":"` + strings.Repeat("$(", 5000) + `"}}`,
 	} {
 		if out := run(t, p); out != "" {
