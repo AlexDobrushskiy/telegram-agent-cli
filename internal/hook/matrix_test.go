@@ -77,6 +77,47 @@ func TestE2ER2Matrix(t *testing.T) {
 	}
 }
 
+// e2e r3 (row 11): opaque execution (eval or sh -c of an expansion, an
+// expansion as the program, interpreter code from an expansion or decoded at
+// run time, a missing script) whose visible text names a TGAC_ variable, the
+// binary, the data dir or a protected settings file asks/denies, on every
+// payload shape. Without such a name it stays silent (docs/safety.md, Limits).
+// Rows: every round-3 case of the tester's main matrix and follow-up, plus
+// the same references on each shape.
+func TestE2ER3OpaqueVisible(t *testing.T) {
+	f, err := os.Open("testdata/e2e-r3/opaque-visible.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	o := matrixOptions()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	n := 0
+	for sc.Scan() {
+		var c struct{ Group, Case, Stdin, Expected string }
+		if err := json.Unmarshal(sc.Bytes(), &c); err != nil {
+			t.Fatal(err)
+		}
+		n++
+		for _, codex := range []bool{false, true} {
+			want := ""
+			if c.Expected == "block" {
+				want = "ask"
+				if codex {
+					want = "deny"
+				}
+			}
+			if got := hookCall(t, codex, o, c.Stdin); got != want {
+				t.Errorf("%s %s codex=%v: %q, want %q\n%s", c.Group, c.Case, codex, got, want, c.Stdin)
+			}
+		}
+	}
+	if err := sc.Err(); err != nil || n != 940 {
+		t.Fatalf("read %d cases: %v", n, err)
+	}
+}
+
 // Everyday calls in the envelope interactive Claude Code 2.1.307 sends (its
 // scratchpad_dir and cwd name a telegram-agent-cli checkout) get main's
 // decision on both hooks. Main asks on e2e commands only because it has no

@@ -99,6 +99,9 @@ func (s *scanner) code(text string, c ctx) {
 	if writesSettings(text, s.o) {
 		s.reasons.add("runs code that touches Claude Code settings or a Codex hook config")
 	}
+	if opaqueCodeRe.MatchString(text) {
+		s.opaque(c, "runs code it builds or decodes at run time (the guard can't see it)", false)
+	}
 	if c.depth > maxDepth || !mentionRe.MatchString(text) {
 		return
 	}
@@ -215,6 +218,8 @@ func (s *scanner) interpreter(name string, args []token, cmd *command, c ctx) {
 		sawCode = true
 		if len(t.subs) > 0 {
 			s.hidden("runs interpreter code built at run time", s.subsDecode(t.subs))
+		} else if t.dynamic {
+			s.opaque(c, "runs interpreter code built at run time", false)
 		}
 		s.code(t.text, c)
 	}

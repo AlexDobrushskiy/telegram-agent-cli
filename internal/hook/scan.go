@@ -113,7 +113,9 @@ type scanner struct {
 	// content the guard can't see; reported only when decoded or when the
 	// visible command links to the account
 	hiddenRs []hiddenReason
-	st       pathState
+	// linked: a visible word names a protected settings file or dir
+	linked bool
+	st     pathState
 	// remote > 0 while scanning a command ssh runs on another host: its paths
 	// name that host's files, so the local filesystem is not consulted
 	remote int
@@ -256,7 +258,11 @@ func (s *scanner) command(cmd *command, c ctx) {
 	for i, w := range cmd.words {
 		if !data[i] {
 			s.envText(w.text) // after quote removal: TGAC_READ''ONLY=0, \=, $'…'
+			s.link(w, c)
 		}
+	}
+	for _, w := range append(append([]token{}, cmd.outRedirs...), cmd.inRedirs...) {
+		s.link(w, c)
 	}
 	s.envTargets(cmd.words, idx)
 	s.pathRules(cmd, idx, data)
@@ -264,6 +270,17 @@ func (s *scanner) command(cmd *command, c ctx) {
 	s.argv(cmd.words, cmd, c)
 	s.track(cmd, idx)
 }
+
+// link notes a visible word naming a local protected settings file or dir
+// (~/.claude, ~/.claude/settings.json, cd ~/.claude && … settings.json).
+func (s *scanner) link(w token, c ctx) {
+	if !s.linked && !c.file && s.remote == 0 && settingsWordRe.MatchString(w.text) && s.settingsPath(w, true) {
+		s.linked = true
+	}
+}
+
+// settingsWordRe pre-filters words before settingsPath touches the disk.
+var settingsWordRe = regexp.MustCompile(`(?i)claude|codex|settings|hooks\.json|config\.toml`)
 
 // dataFlags carry message text (commit messages, PR titles and bodies), not code.
 var dataFlags = set("-m", "--message", "--body", "--title")
@@ -423,8 +440,8 @@ func (s *scanner) argv(words []token, cmd *command, c ctx) {
 			prog = token{kind: tWord, text: v, pat: escMeta(v)}
 		}
 	}
-	if prog.dynamic || prog.glob {
-		s.condAdd(c, "runs a program named by an expansion")
+	if prog.dynamic || prog.glob && prog.text != "[" && prog.text != "[[" {
+		s.opaque(c, "runs a program named by an expansion", s.subsDecode(prog.subs))
 		return
 	}
 	name := base(prog.text)
@@ -456,6 +473,8 @@ func (s *scanner) argv(words []token, cmd *command, c ctx) {
 		for _, a := range args {
 			if len(a.subs) > 0 {
 				s.hidden(reasonBuilt, s.subsDecode(a.subs))
+			} else if a.dynamic {
+				s.opaque(c, reasonBuilt, false) // eval re-parses what the expansion holds
 			}
 		}
 		s.str(joinWords(args), c)
@@ -573,6 +592,8 @@ func (s *scanner) pipedIn(cmd *command, c ctx, run func(string)) {
 						run(string(b))
 					} else if !errorsIsNotExist(err) {
 						s.hidden("runs piped code the guard can't read", false)
+					} else {
+						s.opaque(c, reasonMissing+" ("+a.text+")", false)
 					}
 				}
 				return
@@ -694,6 +715,8 @@ func (s *scanner) file(p string, mode fileMode, c ctx) {
 		if err != nil {
 			if !errorsIsNotExist(err) {
 				s.hidden("runs "+base(full)+", which the guard can't read ("+err.Error()+")", false)
+			} else {
+				s.opaque(c, reasonMissing+" ("+p+")", false)
 			}
 			return
 		}

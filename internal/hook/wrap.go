@@ -28,6 +28,8 @@ func gluedValue(f string, flags map[string]bool) (string, bool) {
 func (s *scanner) cmdString(w token, c ctx) {
 	if len(w.subs) > 0 {
 		s.hidden(reasonBuilt, s.subsDecode(w.subs))
+	} else if w.dynamic {
+		s.opaque(c, reasonBuilt, false) // the shell re-parses what the expansion holds
 	}
 	s.str(w.text, c)
 }

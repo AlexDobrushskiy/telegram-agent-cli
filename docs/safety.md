@@ -94,16 +94,21 @@ Five layers, each independent:
   past it. An agent can also write its own MTProto client.
 - Programs that run other files on their own (`make`, `go test`, `npm run`) are not followed; their
   files are checked when an agent writes them with the file tools or a heredoc, not when they run.
-- Content the hook can't see (a download piped into a shell, `$(…)` run as code, an unreadable
-  script) is only flagged when it is decoded on the way in or the visible command links to the
-  account. Obfuscated content with no visible link to the tool isn't caught; the binary's own write
-  gate (`TGAC_READONLY`) is the main barrier.
-- **Opaque or encoded execution passes.** When the visible text of a call never names
-  `telegram-agent-cli`, a `TGAC_` variable, the data dir or a protected settings path, the hook has
-  nothing to decide on and stays silent. Examples: `eval "$CMD"`, `bash -c "$CMD"`, `"$BIN" e2e send …`,
-  `python3 -c 'import base64; exec(base64.b64decode("…"))'`, `bash /tmp/x.sh` or `python3 x.py` for a
-  script that doesn't exist yet, an unknown tool running opaque code. Each of these can send from the
-  account if the session file is readable and `TGAC_READONLY` is off. Encoded payloads are not
+- Content the hook can't see is opaque: a download piped into a shell, `$(…)` run as code, `eval`
+  or `sh -c` of an expansion, an expansion as the program (`"$BIN" …`), interpreter code from an
+  expansion (`python3 -c "$CODE"`) or that `exec`s/`eval`s something other than a literal, a script
+  it can't read or that doesn't exist yet. Opaque execution asks when it is decoded on the way in, or
+  when the visible text of the call names `telegram-agent-cli`, a `TGAC_` variable, the data dir or
+  a protected settings file (a Claude settings file, the `.claude` dir, a Codex `hooks.json` /
+  `config.toml`): `eval "$TGAC_COMMAND"`, `bash -c "$CMD" ~/.claude/settings.json`,
+  `TGAC_READONLY=0 bash /tmp/x.sh`. A script that ssh runs on another host is not read and not
+  opaque here.
+- **Opaque or encoded execution with no such name passes.** When the visible text never names one
+  of those, the hook has nothing to decide on and stays silent. Examples: `eval "$CMD"`,
+  `bash -c "$CMD"`, `"$BIN" e2e send …`, `python3 -c 'import base64; exec(base64.b64decode("…"))'`,
+  `bash /tmp/x.sh` or `python3 x.py` for a script that doesn't exist yet, an unknown tool running
+  opaque code. Each of these can send from the account if the session file is readable and
+  `TGAC_READONLY` is off; the binary's own write gate is the main barrier. Encoded payloads are not
   decoded, except a shell decode feeding a shell (`eval "$(… | base64 -d)"`), which asks.
 - The prompt is a question to you, not your approval. In `bypassPermissions` mode it is the only
   thing between the agent and the command, so read each one before approving.
