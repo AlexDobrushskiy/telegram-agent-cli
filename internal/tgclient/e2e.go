@@ -27,6 +27,9 @@ type E2E interface {
 
 	// BotHistory returns up to limit messages with id > minID, newest first.
 	BotHistory(ctx context.Context, p *Peer, minID, limit int) ([]BotMessage, error)
+	// BotHistoryBefore returns up to limit messages with id < beforeID (0 = from
+	// the newest), newest first; empty at the start of the chat.
+	BotHistoryBefore(ctx context.Context, p *Peer, beforeID, limit int) ([]BotMessage, error)
 	BotMessagesByID(ctx context.Context, p *Peer, ids []int) ([]BotMessage, error)
 	// PinnedID is the chat's pinned message id (0 = none).
 	PinnedID(ctx context.Context, p *Peer) (int, error)
@@ -58,6 +61,7 @@ type BotMessage struct {
 	Entities  []Entity     `json:"entities,omitempty"`
 	ReplyTo   int          `json:"reply_to,omitempty"`
 	Media     *Media       `json:"media,omitempty"`
+	MediaID   int64        `json:"media_id,omitempty"` // the photo or document id: which file it is
 	Service   *Service     `json:"service,omitempty"`
 	Reactions []Reaction   `json:"reactions,omitempty"`
 	Inline    [][]Button   `json:"inline_keyboard,omitempty"`
@@ -74,6 +78,8 @@ type Entity struct {
 	URL      string `json:"url,omitempty"`
 	UserID   int64  `json:"user_id,omitempty"`
 	Language string `json:"language,omitempty"`
+	// CustomEmojiID is the custom emoji's document id.
+	CustomEmojiID int64 `json:"custom_emoji_id,omitempty"`
 }
 
 // Service describes a service message (pin, web_app_data, …).
@@ -244,6 +250,22 @@ func (s *Session) BotHistory(ctx context.Context, p *Peer, minID, limit int) ([]
 	var out []BotMessage
 	for _, mc := range pr.messages {
 		if m, ok := ToBotMessage(mc); ok && m.ID > minID {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+func (s *Session) BotHistoryBefore(ctx context.Context, p *Peer, beforeID, limit int) ([]BotMessage, error) {
+	r, err := s.api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{Peer: p.InputPeer(), OffsetID: beforeID, Limit: limit})
+	if err != nil {
+		return nil, err
+	}
+	pr := unpackMessages(r)
+	s.absorb(pr.users, pr.chats)
+	var out []BotMessage
+	for _, mc := range pr.messages {
+		if m, ok := ToBotMessage(mc); ok && (beforeID == 0 || m.ID < beforeID) {
 			out = append(out, m)
 		}
 	}
@@ -493,7 +515,8 @@ func ToBotMessage(mc tg.MessageClass) (BotMessage, bool) {
 	case *tg.Message:
 		out := BotMessage{
 			ID: m.ID, Date: ISO(unix(m.Date)), From: from(m.Out), Text: m.Message,
-			Entities: entitiesJSON(m.Message, m.Entities), Media: MediaInfo(m.Media), Album: m.GroupedID,
+			Entities: entitiesJSON(m.Message, m.Entities), Media: MediaInfo(m.Media), MediaID: mediaID(m.Media),
+			Album: m.GroupedID,
 		}
 		if m.EditDate > 0 {
 			out.Edited = ISO(unix(m.EditDate))
@@ -519,6 +542,21 @@ func ToBotMessage(mc tg.MessageClass) (BotMessage, bool) {
 		return out, true
 	}
 	return BotMessage{}, false
+}
+
+// mediaID is the id of a message's photo or document (0 = none).
+func mediaID(mc tg.MessageMediaClass) int64 {
+	switch m := mc.(type) {
+	case *tg.MessageMediaPhoto:
+		if p, ok := m.Photo.(*tg.Photo); ok {
+			return p.ID
+		}
+	case *tg.MessageMediaDocument:
+		if d, ok := m.Document.(*tg.Document); ok {
+			return d.ID
+		}
+	}
+	return 0
 }
 
 func serviceJSON(a tg.MessageActionClass) *Service {
@@ -676,6 +714,8 @@ func entitiesJSON(text string, ents []tg.MessageEntityClass) []Entity {
 			e.UserID = v.UserID
 		case *tg.MessageEntityPre:
 			e.Language = v.Language
+		case *tg.MessageEntityCustomEmoji:
+			e.CustomEmojiID = v.DocumentID
 		}
 		out = append(out, e)
 	}

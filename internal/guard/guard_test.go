@@ -496,3 +496,37 @@ type targeted struct{ ids []int64 }
 func (t *targeted) TypeName() string               { return "messages.setTyping" }
 func (t *targeted) TargetUserIDs() ([]int64, bool) { return t.ids, len(t.ids) > 0 }
 func (t *targeted) Encode(*bin.Buffer) error       { return nil }
+
+// A bot grant covers a plain send to the bot: not a reply that quotes another
+// chat, a send as someone else, or a quick-reply shortcut.
+func TestAllowBotPlainSendsOnly(t *testing.T) {
+	const botID = 42
+	bot := &tg.InputPeerUser{UserID: botID, AccessHash: 7}
+	other := &tg.InputPeerUser{UserID: 43, AccessHash: 7}
+	inv := Middleware(func() bool { return true }, false).Handle(&countingInvoker{})
+	ctx := AllowBot(context.Background(), botID)
+	pass := []bin.Encoder{
+		&tg.MessagesSendMessageRequest{Peer: bot, Message: "x", ReplyTo: &tg.InputReplyToMessage{ReplyToMsgID: 5}},
+		&tg.MessagesSendMediaRequest{Peer: bot, ReplyTo: &tg.InputReplyToMessage{ReplyToMsgID: 5}},
+		&tg.MessagesSendMessageRequest{Peer: bot, Message: "x", ReplyTo: &tg.InputReplyToMessage{ReplyToMsgID: 5, ReplyToPeerID: bot}},
+	}
+	for _, req := range pass {
+		if err := inv.Invoke(ctx, req, nil); err != nil {
+			t.Errorf("%+v blocked: %v", req, err)
+		}
+	}
+	block := []bin.Encoder{
+		&tg.MessagesSendMessageRequest{Peer: bot, Message: "x", ReplyTo: &tg.InputReplyToMessage{ReplyToMsgID: 5, ReplyToPeerID: other}},
+		&tg.MessagesSendMediaRequest{Peer: bot, ReplyTo: &tg.InputReplyToMessage{ReplyToMsgID: 5, ReplyToPeerID: &tg.InputPeerChannel{ChannelID: 9}}},
+		&tg.MessagesSendMessageRequest{Peer: bot, Message: "x", ReplyTo: &tg.InputReplyToMessage{ReplyToMsgID: 5, MonoforumPeerID: other}},
+		&tg.MessagesSendMessageRequest{Peer: bot, Message: "x", ReplyTo: &tg.InputReplyToStory{Peer: other, StoryID: 1}},
+		&tg.MessagesSendMessageRequest{Peer: bot, Message: "x", SendAs: other},
+		&tg.MessagesSendMediaRequest{Peer: bot, SendAs: other},
+		&tg.MessagesSendMessageRequest{Peer: bot, Message: "x", QuickReplyShortcut: &tg.InputQuickReplyShortcut{Shortcut: "s"}},
+	}
+	for _, req := range block {
+		if err := inv.Invoke(ctx, req, nil); err == nil {
+			t.Errorf("%+v passed with a bot grant", req)
+		}
+	}
+}

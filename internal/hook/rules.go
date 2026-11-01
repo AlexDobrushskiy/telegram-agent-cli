@@ -44,7 +44,6 @@ var boolFlags = map[string]bool{
 	"-h": true, "--help": true, "--json": true, "--unread": true, "--archived": true,
 	"--asc": true, "--dms": true, "--groups": true, "--mentions": true,
 	"--dry-run": true, "--force": true, "--no-verify": true,
-	"--remove": true, "--keyboard": true, "--menu": true, "--main": true, "--all": true,
 }
 
 // secretFiles are the data-dir files the Read tool may not open without asking.

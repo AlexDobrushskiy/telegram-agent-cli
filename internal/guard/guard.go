@@ -295,11 +295,24 @@ func userIDs(req any) (ids []int64, ok bool) {
 		}
 		return false
 	}
+	// a send names only its peer: a reply stays in that chat, no send-as or shortcut
+	plain := func(reply tg.InputReplyToClass, sendAs tg.InputPeerClass, shortcut tg.InputQuickReplyShortcutClass) bool {
+		if sendAs != nil || shortcut != nil {
+			return false
+		}
+		switch r := reply.(type) {
+		case nil:
+			return true
+		case *tg.InputReplyToMessage:
+			return r == nil || r.MonoforumPeerID == nil && (r.ReplyToPeerID == nil || peer(r.ReplyToPeerID))
+		}
+		return false
+	}
 	switch r := req.(type) {
 	case *tg.MessagesSendMessageRequest:
-		ok = peer(r.Peer)
+		ok = peer(r.Peer) && plain(r.ReplyTo, r.SendAs, r.QuickReplyShortcut)
 	case *tg.MessagesSendMediaRequest:
-		ok = peer(r.Peer)
+		ok = peer(r.Peer) && plain(r.ReplyTo, r.SendAs, r.QuickReplyShortcut)
 	case *tg.MessagesSendReactionRequest:
 		ok = peer(r.Peer)
 	case *tg.MessagesGetBotCallbackAnswerRequest:

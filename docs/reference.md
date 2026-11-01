@@ -141,10 +141,15 @@ anything is sent. Message ids are the ones your account sees.
 
 `--button` is the button text, or its 0-based index counted row by row. Wait kinds: `reply` (a new
 bot message with id > `--since`, default the newest at start), `edit` (text, entities, buttons or
-media of a bot message change; `--msg` or the 20 newest), `reaction` (reactions change, either side),
-`pin`, `keyboard`, `draft` (`--all` collects drafts until the final message). Write commands take
-`--wait KIND [--timeout] [--interval] [--all]` to send and wait in one call, counting from the
-message they created.
+media of a bot message change; `--msg` or the 20 newest, including bot messages that arrive during
+the wait), `reaction` (reactions change, either side), `pin` (another message is pinned, or the
+pinned one is edited; reactions don't count), `keyboard` (the reply keyboard in effect changes; it is
+looked up however far back it was set), `draft` (`--all` collects drafts until the final message).
+Write commands take `--wait KIND [--timeout] [--interval] [--all]` to act and wait in one call. The
+wait's starting state is taken before the write, so a bot that answers at once is still seen. A send
+(`send …`, `press --keyboard`) waits for `reaction` on the message it sent; `react` waits for the
+other side's reaction (your own doesn't count); `press --msg` watches the pressed message for `edit`
+and `reaction`. `--timeout` also bounds the polls (a long FLOOD_WAIT ends as exit 9).
 
 ```sh
 TGAC_READONLY=0 telegram-agent-cli e2e allow @my_test_bot        # once, by the account owner
@@ -154,8 +159,8 @@ telegram-agent-cli e2e wait --for reaction --msg 4243 --timeout 10
 ```
 
 E2E messages (`BotMessage`): `id`, `date`, `from` (`bot`/`me`), `text`, and when present `edited`,
-`entities[{type,offset,length,text,url,user_id,language}]` (Bot API type names, offsets in UTF-16),
-`reply_to`, `media`, `service{type,button_text,data}`, `reactions[{emoji|custom_emoji_id|paid,count,mine,by}]`,
+`entities[{type,offset,length,text,url,user_id,language,custom_emoji_id}]` (Bot API type names,
+offsets in UTF-16), `reply_to`, `media`, `media_id` (the photo or document id), `service{type,button_text,data}`, `reactions[{emoji|custom_emoji_id|paid,count,mine,by}]`,
 `inline_keyboard[[button]]`, `reply_markup{type:keyboard|hide|force_reply,rows,persistent,resize,one_time,selective,placeholder}`,
 `album`. Buttons: `text`, `type`, and `data`/`data_base64`, `url`, `query`, `copy` by type. Drafts:
 `date`, `draft_id`, `text`, `can_stop`, `keep_on_stop`.

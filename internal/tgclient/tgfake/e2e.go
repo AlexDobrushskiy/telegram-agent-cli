@@ -41,6 +41,14 @@ type E2E struct {
 	// OnHistory runs before each BotHistory with the call count, to script events.
 	OnHistory func(n int)
 	history   int
+	// HistoryCalls counts BotHistory and BotHistoryBefore calls.
+	HistoryCalls int
+	// Stall makes BotHistory block until its ctx ends (a long FLOOD_WAIT).
+	Stall bool
+	// OnWrite runs once per write, before the next read: the bot acting at once,
+	// before the caller can look.
+	OnWrite func(w E2EWrite)
+	written []E2EWrite
 }
 
 var _ tgclient.E2E = (*E2E)(nil)
@@ -79,6 +87,21 @@ func (f *E2E) Edit(m tgclient.BotMessage) {
 func (f *E2E) record(ctx context.Context, w E2EWrite) {
 	w.Grant = guard.GrantedBot(ctx)
 	f.Writes = append(f.Writes, w)
+	f.written = append(f.written, w)
+}
+
+// settle runs OnWrite for the writes made since the last read.
+func (f *E2E) settle() {
+	f.mu.Lock()
+	ws, hook := f.written, f.OnWrite
+	f.written = nil
+	f.mu.Unlock()
+	if hook == nil {
+		return
+	}
+	for _, w := range ws {
+		hook(w)
+	}
 }
 
 func (f *E2E) Self(context.Context) (*tgclient.User, error) {
@@ -97,7 +120,15 @@ func (f *E2E) Resolve(_ context.Context, ref string) (*tgclient.Peer, error) {
 	return nil, output.NotFound("cannot resolve %s", ref)
 }
 
-func (f *E2E) BotHistory(_ context.Context, _ *tgclient.Peer, minID, limit int) ([]tgclient.BotMessage, error) {
+func (f *E2E) BotHistory(ctx context.Context, _ *tgclient.Peer, minID, limit int) ([]tgclient.BotMessage, error) {
+	f.settle()
+	f.mu.Lock()
+	stall := f.Stall
+	f.mu.Unlock()
+	if stall {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	f.mu.Lock()
 	f.history++
 	n, hook := f.history, f.OnHistory
@@ -107,6 +138,7 @@ func (f *E2E) BotHistory(_ context.Context, _ *tgclient.Peer, minID, limit int) 
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.HistoryCalls++
 	var out []tgclient.BotMessage
 	for _, m := range f.Msgs {
 		if m.ID > minID {
@@ -120,7 +152,26 @@ func (f *E2E) BotHistory(_ context.Context, _ *tgclient.Peer, minID, limit int) 
 	return out, nil
 }
 
+func (f *E2E) BotHistoryBefore(_ context.Context, _ *tgclient.Peer, beforeID, limit int) ([]tgclient.BotMessage, error) {
+	f.settle()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.HistoryCalls++
+	var out []tgclient.BotMessage
+	for _, m := range f.Msgs {
+		if beforeID == 0 || m.ID < beforeID {
+			out = append(out, m)
+		}
+	}
+	slices.SortFunc(out, func(a, b tgclient.BotMessage) int { return b.ID - a.ID })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 func (f *E2E) BotMessagesByID(_ context.Context, _ *tgclient.Peer, ids []int) ([]tgclient.BotMessage, error) {
+	f.settle()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []tgclient.BotMessage
@@ -133,6 +184,7 @@ func (f *E2E) BotMessagesByID(_ context.Context, _ *tgclient.Peer, ids []int) ([
 }
 
 func (f *E2E) PinnedID(context.Context, *tgclient.Peer) (int, error) {
+	f.settle()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.Pinned, nil

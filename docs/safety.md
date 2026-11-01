@@ -118,8 +118,11 @@ in read-only mode, so unattended test agents can use it, and it is fenced like t
   `messages.sendReaction`, `messages.getBotCallbackAnswer`, `messages.sendWebViewData`,
   `messages.requestSimpleWebView`, `messages.requestWebView`, `messages.requestMainWebView` and
   `messages.setTyping` (typing, and "stop" on a live draft), each only when every peer it names is
-  that bot user, plus `upload.saveFilePart`/`upload.saveBigFilePart` for media. Wrapped requests,
-  always-denied methods and write-like arguments (paid sends) stay blocked.
+  that bot user, plus `upload.saveFilePart`/`upload.saveBigFilePart` for media. A send must be
+  plain: a reply only to a message in that chat (no quote from another chat), no send-as, no
+  quick-reply shortcut. Wrapped requests, always-denied methods and write-like arguments (paid
+  sends) stay blocked. The allow-list is read again once the account lock is held, so a bot
+  disallowed while a command waited for the lock gets nothing.
 - **Hook.** `e2e` reads and writes pass without a prompt, since the binary enforces the list. The
   hook still asks when an e2e write names a `--chat` that is not literally an allow-list entry
   (`@name`, `name`, `t.me/name`, case-insensitive), and when it comes from an expansion.
@@ -133,8 +136,9 @@ in read-only mode, so unattended test agents can use it, and it is fenced like t
 Codex has no "ask" (it treats one as a hook failure and runs the call), so the decision is `deny`
 with the reason; run a denied command yourself, outside the agent. For tools Claude Code doesn't
 have (`apply_patch`, MCP calls) it denies input that names a data dir, a Claude settings file or a
-Codex hook config. Those configs (`hooks.json` and `config.toml` in any `.codex` dir and in
-`$CODEX_HOME`) are protected like Claude Code settings. Add it to `~/.codex/hooks.json`, then
+Codex hook config, and patches whose files (resolved against the cwd) are one. Those configs
+(`hooks.json` and `config.toml` in any `.codex` dir and in `$CODEX_HOME`) are protected like Claude
+Code settings, including from interpreter code (`python3 -c 'open(...)'`) that writes them. Add it to `~/.codex/hooks.json`, then
 approve it with `/hooks`:
 
 ```json

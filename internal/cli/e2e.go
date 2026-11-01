@@ -93,7 +93,8 @@ func (a *App) e2eAllowed() ([]string, error) {
 
 // withBot checks --chat against the allow-list, connects, resolves the bot and
 // runs fn; fn's result is emitted. A chat that cannot be allowed is refused
-// before connecting.
+// before connecting, and the list is read again once connected (the account
+// lock held), so a bot disallowed meanwhile gets nothing.
 func (a *App) withBot(ctx context.Context, chat string, fn func(ctx context.Context, c *e2eConn) (any, error)) error {
 	allowed, err := a.e2eAllowed()
 	if err != nil {
@@ -104,6 +105,10 @@ func (a *App) withBot(ctx context.Context, chat string, fn func(ctx context.Cont
 	}
 	var data any
 	err = a.ConnectE2E(ctx, a.opts(), func(ctx context.Context, t tgclient.E2E) error {
+		allowed, err := a.e2eAllowed()
+		if err != nil {
+			return err
+		}
 		bot, err := e2e.Target(ctx, t, allowed, chat)
 		if err != nil {
 			return err
@@ -151,16 +156,35 @@ func (w *waitFlags) spec(kind string, since, msg int) e2e.WaitSpec {
 
 func secs(f float64) time.Duration { return time.Duration(f * float64(time.Second)) }
 
-// afterWrite runs the --wait of a write command. since is the id the write
-// created (replies and drafts count after it); msg is the message it acted on.
-func (c *e2eConn) afterWrite(ctx context.Context, w *waitFlags, out map[string]any, since, msg int) (any, error) {
+// watch starts the --wait of a write command (nil without --wait). Call it
+// before the write so whatever the write causes counts, however fast it lands.
+// msg is the message the write acts on (edit/reaction watch it; 0 = the recent
+// ones); mine leaves our own reaction out of a reaction wait.
+func (c *e2eConn) watch(ctx context.Context, w *waitFlags, msg int, mine bool) (*e2e.Watch, error) {
 	if w.kind == "" {
-		return out, nil
+		return nil, nil
 	}
 	if w.kind != e2e.ForEdit && w.kind != e2e.ForReaction {
 		msg = 0
 	}
-	r, err := c.waiter().Wait(ctx, w.spec(w.kind, since, msg))
+	s := w.spec(w.kind, 0, msg)
+	s.IgnoreMine = mine
+	return c.waiter().Begin(ctx, s)
+}
+
+// watchSent points a send's reaction wait at the message it sent.
+func (c *e2eConn) watchSent(x *e2e.Watch, w *waitFlags, id int) {
+	if x != nil && w.kind == e2e.ForReaction {
+		x.Only(id)
+	}
+}
+
+// afterWrite finishes the --wait started by watch and adds its result to out.
+func (c *e2eConn) afterWrite(ctx context.Context, x *e2e.Watch, out map[string]any) (any, error) {
+	if x == nil {
+		return out, nil
+	}
+	r, err := x.Wait(ctx)
 	if err != nil {
 		var oe *output.Error
 		if errors.As(err, &oe) && oe.Code == output.CodeTimeout {
@@ -210,15 +234,20 @@ func (a *App) e2eSendTextCmd() *cobra.Command {
 				return err
 			}
 			return a.withBot(c.Context(), chat, func(ctx context.Context, b *e2eConn) (any, error) {
+				x, err := b.watch(ctx, &w, 0, false)
+				if err != nil {
+					return nil, err
+				}
 				id, err := b.t.BotSendText(b.write(ctx), b.bot, text, reply)
 				if err != nil {
 					return nil, err
 				}
+				b.watchSent(x, &w, id)
 				out, err := b.sent(ctx, id)
 				if err != nil {
 					return nil, err
 				}
-				return b.afterWrite(ctx, &w, out, id, reply)
+				return b.afterWrite(ctx, x, out)
 			})
 		},
 	}
@@ -263,15 +292,20 @@ func (a *App) mediaCmd(kind, use, short string, caption bool) *cobra.Command {
 				}
 			}
 			return a.withBot(c.Context(), chat, func(ctx context.Context, b *e2eConn) (any, error) {
+				x, err := b.watch(ctx, &w, 0, false)
+				if err != nil {
+					return nil, err
+				}
 				id, err := b.t.BotSendMedia(b.write(ctx), b.bot, m, capt, reply)
 				if err != nil {
 					return nil, err
 				}
+				b.watchSent(x, &w, id)
 				out, err := b.sent(ctx, id)
 				if err != nil {
 					return nil, err
 				}
-				return b.afterWrite(ctx, &w, out, id, reply)
+				return b.afterWrite(ctx, x, out)
 			})
 		},
 	}
@@ -320,15 +354,20 @@ func (a *App) e2eSendLocationCmd() *cobra.Command {
 				return err
 			}
 			return a.withBot(c.Context(), chat, func(ctx context.Context, b *e2eConn) (any, error) {
+				x, err := b.watch(ctx, &w, 0, false)
+				if err != nil {
+					return nil, err
+				}
 				id, err := b.t.BotSendMedia(b.write(ctx), b.bot, tgclient.OutMedia{Kind: "location", Lat: lat, Long: long}, "", reply)
 				if err != nil {
 					return nil, err
 				}
+				b.watchSent(x, &w, id)
 				out, err := b.sent(ctx, id)
 				if err != nil {
 					return nil, err
 				}
-				return b.afterWrite(ctx, &w, out, id, reply)
+				return b.afterWrite(ctx, x, out)
 			})
 		},
 	}
@@ -365,6 +404,10 @@ func (a *App) e2eReactCmd() *cobra.Command {
 				return err
 			}
 			return a.withBot(c.Context(), chat, func(ctx context.Context, b *e2eConn) (any, error) {
+				x, err := b.watch(ctx, &w, msg, true)
+				if err != nil {
+					return nil, err
+				}
 				if err := b.t.React(b.write(ctx), b.bot, msg, emoji); err != nil {
 					return nil, err
 				}
@@ -373,7 +416,7 @@ func (a *App) e2eReactCmd() *cobra.Command {
 					return nil, err
 				}
 				out := map[string]any{"chat": b.bot.Ref(), "reacted": map[string]any{"msg": msg, "emoji": emoji, "removed": remove}, "message": m}
-				return b.afterWrite(ctx, &w, out, msg, msg)
+				return b.afterWrite(ctx, x, out)
 			})
 		},
 	}
@@ -445,16 +488,16 @@ func (c *e2eConn) pressInline(ctx context.Context, msg int, sel string, w *waitF
 	if btn.Password {
 		return nil, output.Usage("button %q needs the account password; not supported", btn.Text)
 	}
+	x, err := c.watch(ctx, w, msg, false)
+	if err != nil {
+		return nil, err
+	}
 	ans, err := c.t.PressCallback(c.write(ctx), c.bot, msg, btn.CallbackData())
 	if err != nil {
 		return nil, err
 	}
 	out := map[string]any{"chat": c.bot.Ref(), "msg": msg, "pressed": btn, "answer": ans}
-	since, err := e2e.NewestID(ctx, c.t, c.bot)
-	if err != nil {
-		return nil, err
-	}
-	return c.afterWrite(ctx, w, out, since, msg)
+	return c.afterWrite(ctx, x, out)
 }
 
 func (c *e2eConn) pressKeyboard(ctx context.Context, sel string, w *waitFlags) (any, error) {
@@ -472,17 +515,22 @@ func (c *e2eConn) pressKeyboard(ctx context.Context, sel string, w *waitFlags) (
 	if btn.Type != "text" {
 		return nil, output.Usage("button %q is a %s button; only plain buttons send their text (Mini App: web-app-data / webapp-url)", btn.Text, btn.Type)
 	}
+	x, err := c.watch(ctx, w, 0, false)
+	if err != nil {
+		return nil, err
+	}
 	id, err := c.t.BotSendText(c.write(ctx), c.bot, btn.Text, 0)
 	if err != nil {
 		return nil, err
 	}
+	c.watchSent(x, w, id)
 	out, err := c.sent(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	out["pressed"] = btn
 	out["keyboard_message_id"] = kb.MessageID
-	return c.afterWrite(ctx, w, out, id, 0)
+	return c.afterWrite(ctx, x, out)
 }
 
 func (a *App) e2eWebAppDataCmd() *cobra.Command {
@@ -527,6 +575,10 @@ func (a *App) e2eWebAppDataCmd() *cobra.Command {
 				if err != nil {
 					return nil, err
 				}
+				x, err := b.watch(ctx, &w, 0, false)
+				if err != nil {
+					return nil, err
+				}
 				if err := b.t.SendWebAppData(b.write(ctx), b.bot, btn.Text, data); err != nil {
 					return nil, err
 				}
@@ -537,12 +589,11 @@ func (a *App) e2eWebAppDataCmd() *cobra.Command {
 						if m.From == "me" && m.Service != nil {
 							mm := m
 							out["sent"] = &mm
-							since = max(since, m.ID)
 							break
 						}
 					}
 				}
-				return b.afterWrite(ctx, &w, out, since, 0)
+				return b.afterWrite(ctx, x, out)
 			})
 		},
 	}
@@ -666,7 +717,7 @@ func (a *App) e2eStopCmd() *cobra.Command {
 				return err
 			}
 			return a.withBot(c.Context(), chat, func(ctx context.Context, b *e2eConn) (any, error) {
-				since, err := e2e.NewestID(ctx, b.t, b.bot)
+				x, err := b.watch(ctx, &w, 0, false)
 				if err != nil {
 					return nil, err
 				}
@@ -674,7 +725,7 @@ func (a *App) e2eStopCmd() *cobra.Command {
 					return nil, err
 				}
 				out := map[string]any{"chat": b.bot.Ref(), "stopped": draftID}
-				return b.afterWrite(ctx, &w, out, since, 0)
+				return b.afterWrite(ctx, x, out)
 			})
 		},
 	}

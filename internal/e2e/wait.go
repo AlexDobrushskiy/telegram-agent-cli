@@ -32,6 +32,8 @@ type WaitSpec struct {
 	Interval time.Duration
 	// All (draft): keep collecting drafts until the final message lands.
 	All bool
+	// IgnoreMine (reaction): only the other side's reactions count.
+	IgnoreMine bool
 }
 
 // Result is what a wait saw.
@@ -59,16 +61,23 @@ const DefaultInterval = time.Second
 // recentWindow is how many recent messages edit/reaction waits watch.
 const recentWindow = 20
 
-// keyboardScan is how far back the keyboard in effect is looked for.
-const keyboardScan = 100
+// historyPage is how many messages one history read asks for (Telegram's maximum).
+const historyPage = 100
 
-// ReadKeyboard returns the reply keyboard the chat shows now (nil = none).
+// ReadKeyboard returns the reply keyboard the chat shows now (nil = none). It
+// reads back until a bot message sets or removes one, or the chat starts.
 func ReadKeyboard(ctx context.Context, t tgclient.E2E, p *tgclient.Peer) (*Keyboard, error) {
-	msgs, err := t.BotHistory(ctx, p, 0, keyboardScan)
-	if err != nil {
-		return nil, err
+	before := 0
+	for {
+		msgs, err := t.BotHistoryBefore(ctx, p, before, historyPage)
+		if err != nil || len(msgs) == 0 {
+			return nil, err
+		}
+		if kb, decided := keyboardIn(msgs); decided {
+			return kb, nil
+		}
+		before = msgs[len(msgs)-1].ID
 	}
-	return CurrentKeyboard(msgs), nil
 }
 
 // ReadPinned returns the pinned message (nil = none).
@@ -106,32 +115,80 @@ func editState(m tgclient.BotMessage) any {
 		Entities []tgclient.Entity   `json:"entities,omitempty"`
 		Inline   [][]tgclient.Button `json:"inline_keyboard,omitempty"`
 		Media    *tgclient.Media     `json:"media,omitempty"`
-	}{m.Text, m.Entities, m.Inline, m.Media}
+		MediaID  int64               `json:"media_id,omitempty"`
+	}{m.Text, m.Entities, m.Inline, m.Media, m.MediaID}
 }
 
 func reactionState(m tgclient.BotMessage) any { return m.Reactions }
 
+// pinState is what a pin change changes: which message, and its content.
+func pinState(m *tgclient.BotMessage) any {
+	if m == nil {
+		return nil
+	}
+	return []any{m.ID, editState(*m)}
+}
+
+// othersReactions is reactionState without our own reaction.
+func othersReactions(m tgclient.BotMessage) any {
+	var out []tgclient.Reaction
+	for _, r := range m.Reactions {
+		if r.Mine {
+			r.Count--
+			r.Mine = false
+		}
+		r.By = nil
+		if r.Count > 0 {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// Watch is a wait whose starting state is already taken. Begin it before a
+// write: whatever the write causes counts, however fast it lands.
+type Watch struct {
+	w     *Waiter
+	s     WaitSpec
+	res   *Result
+	check func(ctx context.Context) (bool, error)
+	only  int // edit/reaction: set by Only
+}
+
+// Only narrows an edit or reaction wait to message id, typically the one the
+// write just created.
+func (x *Watch) Only(id int) { x.only = id }
+
 // Wait polls until the event happens or the timeout passes (exit 9).
 func (w *Waiter) Wait(ctx context.Context, s WaitSpec) (*Result, error) {
+	x, err := w.Begin(ctx, s)
+	if err != nil {
+		return nil, err
+	}
+	return x.Wait(ctx)
+}
+
+// Begin takes the starting state the wait compares against.
+func (w *Waiter) Begin(ctx context.Context, s WaitSpec) (*Watch, error) {
 	if s.Interval <= 0 {
 		s.Interval = DefaultInterval
 	}
-	start := w.Now()
-	deadline := start.Add(s.Timeout)
-	res := &Result{For: s.For}
-	done := func() (*Result, error) {
-		res.Elapsed = float64(w.Now().Sub(start).Milliseconds()) / 1000
-		return res, nil
+	x := &Watch{w: w, s: s, res: &Result{For: s.For}}
+	res := x.res
+	if !slices.Contains(Kinds, s.For) {
+		return nil, output.Usage("--for must be one of %v", Kinds)
 	}
-
-	var check func() (bool, error)
-	switch s.For {
-	case ForReply:
-		since, err := w.since(ctx, s.Since)
-		if err != nil {
+	since := s.Since
+	if since <= 0 && (s.For == ForReply || s.For == ForDraft) {
+		var err error
+		if since, err = NewestID(ctx, w.T, w.Peer); err != nil {
 			return nil, err
 		}
-		check = func() (bool, error) {
+	}
+
+	switch s.For {
+	case ForReply:
+		x.check = func(ctx context.Context) (bool, error) {
 			msgs, err := w.newBotMessages(ctx, since)
 			if err != nil || len(msgs) == 0 {
 				return false, err
@@ -140,27 +197,51 @@ func (w *Waiter) Wait(ctx context.Context, s WaitSpec) (*Result, error) {
 			return true, nil
 		}
 	case ForEdit, ForReaction:
+		edit := s.For == ForEdit
 		state := editState
-		if s.For == ForReaction {
+		if !edit {
 			state = reactionState
+			if s.IgnoreMine {
+				state = othersReactions
+			}
 		}
-		before, err := w.snapshot(ctx, s.Msg, s.For == ForEdit)
+		before, newest, err := w.snapshot(ctx, s.Msg, edit)
 		if err != nil {
 			return nil, err
 		}
-		check = func() (bool, error) {
-			now, err := w.snapshot(ctx, s.Msg, s.For == ForEdit)
+		x.check = func(ctx context.Context) (bool, error) {
+			msg := s.Msg
+			if x.only > 0 {
+				msg = x.only
+			}
+			now, _, err := w.snapshot(ctx, msg, edit)
 			if err != nil {
 				return false, err
 			}
 			for _, m := range now {
 				old, seen := before[m.ID]
 				if !seen {
-					continue // new messages are not edits or reactions on watched ones
+					if m.ID <= newest {
+						continue // older than the start, outside the window then
+					}
+					// A message that arrived after Begin started with no reactions and,
+					// unless it is already marked edited, as it is now.
+					old = m
+					old.Reactions = nil
+					if edit && (m.Edited == "" || len(m.Reactions) > 0) {
+						before[m.ID] = m
+						continue
+					}
+					if edit {
+						old.Text, old.Entities, old.Inline, old.Media, old.MediaID = "", nil, nil, nil, 0
+					}
 				}
 				if fingerprint(state(old)) != fingerprint(state(m)) {
 					mm := m
-					res.Message, res.Before = &mm, state(old)
+					res.Message = &mm
+					if seen || !edit {
+						res.Before = state(old)
+					}
 					return true, nil
 				}
 			}
@@ -171,26 +252,35 @@ func (w *Waiter) Wait(ctx context.Context, s WaitSpec) (*Result, error) {
 		if err != nil {
 			return nil, err
 		}
-		check = func() (bool, error) {
+		x.check = func(ctx context.Context) (bool, error) {
 			now, err := ReadPinned(ctx, w.T, w.Peer)
 			if err != nil {
 				return false, err
 			}
-			if fingerprint(now) != fingerprint(before) {
+			if fingerprint(pinState(now)) != fingerprint(pinState(before)) {
 				res.Message, res.Before = now, before
 				return true, nil
 			}
 			return false, nil
 		}
 	case ForKeyboard:
+		newest, err := NewestID(ctx, w.T, w.Peer)
+		if err != nil {
+			return nil, err
+		}
 		before, err := ReadKeyboard(ctx, w.T, w.Peer)
 		if err != nil {
 			return nil, err
 		}
-		check = func() (bool, error) {
-			now, err := ReadKeyboard(ctx, w.T, w.Peer)
+		// Only messages after Begin can change it; the rest is read once.
+		x.check = func(ctx context.Context) (bool, error) {
+			msgs, err := w.T.BotHistory(ctx, w.Peer, newest, historyPage)
 			if err != nil {
 				return false, err
+			}
+			now, decided := keyboardIn(msgs)
+			if !decided {
+				now = before
 			}
 			if fingerprint(now) != fingerprint(before) {
 				res.Keyboard, res.Before = now, before
@@ -199,11 +289,7 @@ func (w *Waiter) Wait(ctx context.Context, s WaitSpec) (*Result, error) {
 			return false, nil
 		}
 	case ForDraft:
-		since, err := w.since(ctx, s.Since)
-		if err != nil {
-			return nil, err
-		}
-		check = func() (bool, error) {
+		x.check = func(ctx context.Context) (bool, error) {
 			for {
 				select {
 				case d := <-w.T.Drafts():
@@ -225,37 +311,46 @@ func (w *Waiter) Wait(ctx context.Context, s WaitSpec) (*Result, error) {
 			res.Messages, res.Message = msgs, &msgs[len(msgs)-1]
 			return true, nil
 		}
-	default:
-		return nil, output.Usage("--for must be one of %v", Kinds)
 	}
+	return x, nil
+}
 
+// Wait polls until the event happens or the timeout passes (exit 9). The
+// timeout counts from here, not from Begin.
+func (x *Watch) Wait(ctx context.Context) (*Result, error) {
+	w, s, res := x.w, x.s, x.res
+	start := w.Now()
+	deadline := start.Add(s.Timeout)
+	timeout := func() error {
+		e := output.Timeout("no %s within %s", s.For, s.Timeout).WithDetail("for", s.For).
+			WithDetail("timeout_s", s.Timeout.Seconds())
+		if len(res.Drafts) > 0 {
+			e = e.WithDetail("drafts", res.Drafts)
+		}
+		return e
+	}
+	// The polls share the timeout: one stuck in a FLOOD_WAIT ends with it.
+	pctx, cancel := context.WithTimeout(ctx, s.Timeout)
+	defer cancel()
 	for {
-		ok, err := check()
+		ok, err := x.check(pctx)
 		if err != nil {
+			if ctx.Err() == nil && pctx.Err() != nil {
+				return nil, timeout()
+			}
 			return nil, err
 		}
 		if ok {
-			return done()
+			res.Elapsed = float64(w.Now().Sub(start).Milliseconds()) / 1000
+			return res, nil
 		}
 		if !w.Now().Before(deadline) {
-			e := output.Timeout("no %s within %s", s.For, s.Timeout).WithDetail("for", s.For).
-				WithDetail("timeout_s", s.Timeout.Seconds())
-			if len(res.Drafts) > 0 {
-				e = e.WithDetail("drafts", res.Drafts)
-			}
-			return nil, e
+			return nil, timeout()
 		}
 		if err := w.Sleep(ctx, min(s.Interval, deadline.Sub(w.Now()))); err != nil {
 			return nil, err
 		}
 	}
-}
-
-func (w *Waiter) since(ctx context.Context, since int) (int, error) {
-	if since > 0 {
-		return since, nil
-	}
-	return NewestID(ctx, w.T, w.Peer)
 }
 
 // newBotMessages returns the bot's messages after since, oldest first.
@@ -275,27 +370,29 @@ func (w *Waiter) newBotMessages(ctx context.Context, since int) ([]tgclient.BotM
 }
 
 // snapshot maps id → message for the watched message or the recent ones
-// (only the bot's when botOnly).
-func (w *Waiter) snapshot(ctx context.Context, msg int, botOnly bool) (map[int]tgclient.BotMessage, error) {
+// (only the bot's when botOnly), and gives the newest id it saw.
+func (w *Waiter) snapshot(ctx context.Context, msg int, botOnly bool) (map[int]tgclient.BotMessage, int, error) {
 	var msgs []tgclient.BotMessage
 	var err error
 	if msg > 0 {
 		msgs, err = w.T.BotMessagesByID(ctx, w.Peer, []int{msg})
 		if err == nil && len(msgs) == 0 {
-			return nil, output.NotFound("message %d not found in this chat", msg)
+			return nil, 0, output.NotFound("message %d not found in this chat", msg)
 		}
 	} else {
 		msgs, err = w.T.BotHistory(ctx, w.Peer, 0, recentWindow)
 	}
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	out := map[int]tgclient.BotMessage{}
+	newest := 0
 	for _, m := range msgs {
+		newest = max(newest, m.ID)
 		if botOnly && msg == 0 && m.From != "bot" {
 			continue
 		}
 		out[m.ID] = m
 	}
-	return out, nil
+	return out, newest, nil
 }

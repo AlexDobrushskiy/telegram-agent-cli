@@ -203,3 +203,26 @@ func TestDraftHandler(t *testing.T) {
 	default:
 	}
 }
+
+// Two messages that differ only in which file or custom emoji they carry
+// convert differently, so an edit that swaps one is visible.
+func TestToBotMessageKeepsMediaAndEmojiIdentity(t *testing.T) {
+	doc := func(id int64) *tg.Message {
+		return &tg.Message{ID: 1, Message: "🙂 x", Media: &tg.MessageMediaDocument{Document: &tg.Document{
+			ID: id, MimeType: "application/pdf", Size: 10,
+			Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: "r.pdf"}},
+		}}, Entities: []tg.MessageEntityClass{&tg.MessageEntityCustomEmoji{Offset: 0, Length: 2, DocumentID: id}}}
+	}
+	a, _ := ToBotMessage(doc(1))
+	b, _ := ToBotMessage(doc(2))
+	if a.MediaID != 1 || b.MediaID != 2 {
+		t.Errorf("media ids = %d, %d", a.MediaID, b.MediaID)
+	}
+	if a.Entities[0].CustomEmojiID != 1 || b.Entities[0].CustomEmojiID != 2 {
+		t.Errorf("custom emoji = %+v / %+v", a.Entities[0], b.Entities[0])
+	}
+	p, _ := ToBotMessage(&tg.Message{ID: 2, Media: &tg.MessageMediaPhoto{Photo: &tg.Photo{ID: 9}}})
+	if p.MediaID != 9 {
+		t.Errorf("photo id = %d", p.MediaID)
+	}
+}

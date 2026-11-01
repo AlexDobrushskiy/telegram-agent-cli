@@ -111,6 +111,9 @@ func RunCodex(r io.Reader, w io.Writer, o Options) error {
 
 // EvaluateCodex is Evaluate plus a check of tools Claude Code doesn't have.
 func EvaluateCodex(in Input, o Options) string {
+	if o.Cwd == "" {
+		o.Cwd = in.Cwd
+	}
 	if r := Evaluate(in, o); r != "" {
 		return r
 	}
@@ -127,14 +130,48 @@ func EvaluateCodex(in Input, o Options) string {
 			return "Telegram account data: " + in.ToolName + " " + reasonDataDir
 		}
 	}
-	if codexHookRe.MatchString(text) || settingsCodeRe.MatchString(text) {
-		return "Telegram account guard: " + in.ToolName + " touches agent settings or hook config"
+	settings := "Telegram account guard: " + in.ToolName + " touches agent settings or hook config"
+	if namesCodexHook(text, o) || settingsCodeRe.MatchString(text) {
+		return settings
+	}
+	// apply_patch: the files a patch adds, updates, deletes or moves to.
+	for _, v := range strValues(in.ToolInput) {
+		for _, m := range patchFileRe.FindAllStringSubmatch(v, -1) {
+			p := absPath(m[1], o)
+			if settingsTarget(p, o) {
+				return settings
+			}
+			if r := CheckFile("Write", p, o); r != "" {
+				return "Telegram account data: " + in.ToolName + " " + r
+			}
+		}
 	}
 	return ""
 }
 
-// codexHookRe names a Codex hook config file.
-var codexHookRe = regexp.MustCompile(`(?i)\.codex[/\\]+(?:hooks\.json|config\.toml)`)
+// patchFileRe is a file line of an apply_patch body.
+var patchFileRe = regexp.MustCompile(`(?m)^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+?)[ \t\r]*$`)
+
+// strValues returns every string inside v.
+func strValues(v any) []string {
+	switch x := v.(type) {
+	case string:
+		return []string{x}
+	case map[string]any:
+		var out []string
+		for _, e := range x {
+			out = append(out, strValues(e)...)
+		}
+		return out
+	case []any:
+		var out []string
+		for _, e := range x {
+			out = append(out, strValues(e)...)
+		}
+		return out
+	}
+	return nil
+}
 
 func runHook(r io.Reader, w io.Writer, o Options, decision string, eval func(Input, Options) string) error {
 	deadline := o.Deadline

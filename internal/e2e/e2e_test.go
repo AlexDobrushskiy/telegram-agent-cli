@@ -396,3 +396,101 @@ func TestWaitUnknownKind(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A reaction on the pinned message is not a pin change.
+func TestWaitPinIgnoresReactions(t *testing.T) {
+	f := tgfake.NewE2E(testBot)
+	f.Add(tgclient.BotMessage{ID: 40, From: "bot", Text: "🎯 vault"})
+	f.Pinned = 40
+	w, c := waiter(f)
+	w.Sleep = func(ctx context.Context, d time.Duration) error {
+		f.Edit(tgclient.BotMessage{ID: 40, From: "bot", Text: "🎯 vault", Edited: "x", Reactions: []tgclient.Reaction{{Emoji: "👍", Count: 1, Mine: true}}})
+		return c.sleep(ctx, d)
+	}
+	s := spec(ForPin)
+	s.Timeout = 3 * time.Second
+	if _, err := w.Wait(context.Background(), s); code(err) != output.CodeTimeout {
+		t.Fatalf("err = %v, want timeout", err)
+	}
+}
+
+// Swapping the file or a custom emoji is an edit even when the rest is equal.
+func TestWaitEditSeesMediaAndEmojiSwaps(t *testing.T) {
+	for _, swap := range []func(m *tgclient.BotMessage){
+		func(m *tgclient.BotMessage) { m.MediaID = 2 },
+		func(m *tgclient.BotMessage) {
+			m.Entities = []tgclient.Entity{{Type: "custom_emoji", Length: 2, CustomEmojiID: 2}}
+		},
+	} {
+		f := tgfake.NewE2E(testBot)
+		orig := tgclient.BotMessage{ID: 20, From: "bot", Text: "🙂", Media: &tgclient.Media{Type: "document", Name: "r.pdf", Size: 10},
+			MediaID: 1, Entities: []tgclient.Entity{{Type: "custom_emoji", Length: 2, CustomEmojiID: 1}}}
+		f.Add(orig)
+		w, c := waiter(f)
+		w.Sleep = func(ctx context.Context, d time.Duration) error {
+			m := orig
+			swap(&m)
+			f.Edit(m)
+			return c.sleep(ctx, d)
+		}
+		s := spec(ForEdit)
+		s.Msg = 20
+		if _, err := w.Wait(context.Background(), s); err != nil {
+			t.Fatalf("edit not seen: %v", err)
+		}
+	}
+}
+
+// A persistent keyboard stays in effect however many messages follow it.
+func TestReadKeyboardBeyondOnePage(t *testing.T) {
+	f := tgfake.NewE2E(testBot)
+	f.Add(tgclient.BotMessage{ID: 10, From: "bot", Text: "🎯", Markup: kb("→ vault")})
+	for i := 11; i < 400; i++ {
+		f.Add(tgclient.BotMessage{ID: i, From: []string{"me", "bot"}[i%2], Text: "chat"})
+	}
+	got, err := ReadKeyboard(context.Background(), f, &testBot)
+	if err != nil || got == nil || got.MessageID != 10 {
+		t.Fatalf("keyboard = %+v, %v", got, err)
+	}
+	// and a keyboard wait doesn't page the whole chat on every poll
+	f.OnHistory = nil
+	w, c := waiter(f)
+	polls := 0
+	w.Sleep = func(ctx context.Context, d time.Duration) error {
+		if polls++; polls == 3 {
+			f.Add(tgclient.BotMessage{ID: 400, From: "bot", Text: "🎯 ev", Markup: kb("→ ev")})
+		}
+		return c.sleep(ctx, d)
+	}
+	f.HistoryCalls = 0
+	r, err := w.Wait(context.Background(), spec(ForKeyboard))
+	if err != nil || r.Keyboard.MessageID != 400 || r.Before.(*Keyboard).MessageID != 10 {
+		t.Fatalf("wait = %+v, %v", r, err)
+	}
+	if f.HistoryCalls > 10 {
+		t.Errorf("%d history calls for a 3-poll wait", f.HistoryCalls)
+	}
+}
+
+// The timeout bounds the polls too: a read stuck in a long FLOOD_WAIT ends as
+// a timeout, not after it.
+func TestWaitTimeoutBoundsPolls(t *testing.T) {
+	f := tgfake.NewE2E(testBot)
+	f.Add(tgclient.BotMessage{ID: 10, From: "bot"})
+	w, _ := waiter(f)
+	x, err := w.Begin(context.Background(), WaitSpec{For: ForReply, Timeout: 20 * time.Millisecond, Interval: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Stall = true
+	done := make(chan error, 1)
+	go func() { _, err := x.Wait(context.Background()); done <- err }()
+	select {
+	case err := <-done:
+		if code(err) != output.CodeTimeout {
+			t.Fatalf("err = %v, want timeout", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stuck poll outlived the timeout")
+	}
+}

@@ -119,16 +119,23 @@ type Keyboard struct {
 // with a non-inline markup decides; hide and force_reply leave none. msgs are
 // newest first. The result is nil when no keyboard is shown.
 func CurrentKeyboard(msgs []tgclient.BotMessage) *Keyboard {
+	kb, _ := keyboardIn(msgs)
+	return kb
+}
+
+// keyboardIn is CurrentKeyboard; decided is false when no message in msgs
+// sets or removes a keyboard (an older one may still be in effect).
+func keyboardIn(msgs []tgclient.BotMessage) (kb *Keyboard, decided bool) {
 	for _, m := range msgs {
 		if m.From != "bot" || m.Markup == nil {
 			continue
 		}
 		if m.Markup.Type != "keyboard" {
-			return nil
+			return nil, true
 		}
-		return &Keyboard{MessageID: m.ID, Markup: m.Markup}
+		return &Keyboard{MessageID: m.ID, Markup: m.Markup}, true
 	}
-	return nil
+	return nil, false
 }
 
 // FindButton picks a button by exact text, else by its 0-based position counted

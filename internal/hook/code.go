@@ -96,8 +96,8 @@ var (
 
 // code analyses interpreter code.
 func (s *scanner) code(text string, c ctx) {
-	if writesSettings(text) {
-		s.reasons.add("runs code that touches Claude Code settings")
+	if writesSettings(text, s.o) {
+		s.reasons.add("runs code that touches Claude Code settings or a Codex hook config")
 	}
 	if c.depth > maxDepth || !mentionRe.MatchString(text) {
 		return

@@ -309,3 +309,191 @@ func strs(v any) []string {
 	}
 	return out
 }
+
+// botReacts sets the bot's reaction on message id.
+func botReacts(f *tgfake.E2E, id int, emoji string) {
+	for i := range f.Msgs {
+		if f.Msgs[i].ID == id {
+			f.Msgs[i].Reactions = append(f.Msgs[i].Reactions, tgclient.Reaction{Emoji: emoji, Count: 1, By: []int64{e2eBot.RawID}})
+		}
+	}
+}
+
+// The bot answers a write at once, before the command reads anything: the
+// wait must still see it (its baseline is the state before the write).
+func TestE2EWaitSeesEventsRightAfterTheWrite(t *testing.T) {
+	waitOf := func(d map[string]any) map[string]any { return d["wait"].(map[string]any) }
+
+	t.Run("send text, reaction on the sent message", func(t *testing.T) {
+		h := newE2EHarness(t, "@my_test_bot")
+		h.bot.Add(tgclient.BotMessage{ID: 5, From: "bot", Text: "hello"})
+		h.bot.OnWrite = func(w tgfake.E2EWrite) { botReacts(h.bot, h.bot.NextID, "👀") }
+		d := h.ok("e2e", "send", "text", "hi", "--wait", "reaction", "--timeout", "3")
+		m := waitOf(d)["message"].(map[string]any)
+		if m["id"] != float64(h.bot.NextID) || m["reactions"].([]any)[0].(map[string]any)["emoji"] != "👀" {
+			t.Fatalf("wait = %v", waitOf(d))
+		}
+	})
+
+	t.Run("send text, reply then edit", func(t *testing.T) {
+		h := newE2EHarness(t, "@my_test_bot")
+		h.bot.OnWrite = func(w tgfake.E2EWrite) {
+			h.bot.Add(tgclient.BotMessage{ID: 2000, From: "bot", Text: "thinking"})
+		}
+		h.bot.OnHistory = func(n int) {
+			if n == 4 {
+				h.bot.Edit(tgclient.BotMessage{ID: 2000, From: "bot", Text: "done", Edited: "2026-01-01T00:00:02Z"})
+			}
+		}
+		d := h.ok("e2e", "send", "text", "hi", "--wait", "edit", "--timeout", "5")
+		if m := waitOf(d)["message"].(map[string]any); m["text"] != "done" {
+			t.Fatalf("wait = %v", waitOf(d))
+		}
+	})
+
+	t.Run("send text, reply during the wait, then edit", func(t *testing.T) {
+		h := newE2EHarness(t, "@my_test_bot")
+		h.bot.OnHistory = func(n int) {
+			switch n {
+			case 3:
+				h.bot.Add(tgclient.BotMessage{ID: 2000, From: "bot", Text: "thinking"})
+			case 5:
+				h.bot.Edit(tgclient.BotMessage{ID: 2000, From: "bot", Text: "done", Edited: "2026-01-01T00:00:03Z"})
+			}
+		}
+		d := h.ok("e2e", "send", "text", "hi", "--wait", "edit", "--timeout", "8")
+		if m := waitOf(d)["message"].(map[string]any); m["text"] != "done" {
+			t.Fatalf("wait = %v", waitOf(d))
+		}
+	})
+
+	t.Run("send text, reply already edited", func(t *testing.T) {
+		h := newE2EHarness(t, "@my_test_bot")
+		h.bot.OnWrite = func(w tgfake.E2EWrite) {
+			h.bot.Add(tgclient.BotMessage{ID: 2000, From: "bot", Text: "done", Edited: "2026-01-01T00:00:01Z"})
+		}
+		d := h.ok("e2e", "send", "text", "hi", "--wait", "edit", "--timeout", "3")
+		if m := waitOf(d)["message"].(map[string]any); m["text"] != "done" {
+			t.Fatalf("wait = %v", waitOf(d))
+		}
+	})
+
+	t.Run("press inline, reply", func(t *testing.T) {
+		h := newE2EHarness(t, "@my_test_bot")
+		h.bot.Add(tgclient.BotMessage{ID: 7, From: "bot", Text: "pick", Inline: [][]tgclient.Button{{{Text: "A", Type: "callback", Data: "a"}}}})
+		h.bot.OnWrite = func(w tgfake.E2EWrite) {
+			h.bot.Add(tgclient.BotMessage{ID: 2000, From: "bot", Text: "you picked A"})
+		}
+		d := h.ok("e2e", "press", "--msg", "7", "--button", "A", "--wait", "reply", "--timeout", "3")
+		if m := waitOf(d)["message"].(map[string]any); m["text"] != "you picked A" {
+			t.Fatalf("wait = %v", waitOf(d))
+		}
+	})
+
+	t.Run("stop, final message", func(t *testing.T) {
+		h := newE2EHarness(t, "@my_test_bot")
+		h.bot.Add(tgclient.BotMessage{ID: 7, From: "me", Text: "q"})
+		h.bot.OnWrite = func(w tgfake.E2EWrite) {
+			h.bot.Add(tgclient.BotMessage{ID: 2000, From: "bot", Text: "stopped"})
+		}
+		d := h.ok("e2e", "stop", "--draft", "9", "--wait", "reply", "--timeout", "3")
+		if m := waitOf(d)["message"].(map[string]any); m["text"] != "stopped" {
+			t.Fatalf("wait = %v", waitOf(d))
+		}
+	})
+
+	t.Run("keyboard press, new keyboard", func(t *testing.T) {
+		h := newE2EHarness(t, "@my_test_bot")
+		h.bot.Add(tgclient.BotMessage{ID: 10, From: "bot", Text: "menu", Markup: &tgclient.ReplyMarkup{
+			Type: "keyboard", Rows: [][]tgclient.Button{{{Text: "next", Type: "text"}}}}})
+		h.bot.OnWrite = func(w tgfake.E2EWrite) {
+			h.bot.Add(tgclient.BotMessage{ID: 2000, From: "bot", Text: "page 2", Markup: &tgclient.ReplyMarkup{
+				Type: "keyboard", Rows: [][]tgclient.Button{{{Text: "back", Type: "text"}}}}})
+		}
+		d := h.ok("e2e", "press", "--keyboard", "--button", "next", "--wait", "keyboard", "--timeout", "3")
+		if kb := waitOf(d)["keyboard"].(map[string]any); kb["message_id"] != float64(2000) {
+			t.Fatalf("wait = %v", waitOf(d))
+		}
+	})
+
+	t.Run("react: the bot's reaction counts, our own does not", func(t *testing.T) {
+		h := newE2EHarness(t, "@my_test_bot")
+		h.bot.Add(tgclient.BotMessage{ID: 7, From: "me", Text: "q"})
+		h.bot.OnWrite = func(w tgfake.E2EWrite) {
+			if w.Text == "👍" {
+				botReacts(h.bot, 7, "👀")
+			}
+		}
+		h.fail(output.ExitTimeout, output.CodeTimeout, "e2e", "react", "--msg", "7", "--emoji", "❤️", "--wait", "reaction", "--timeout", "3")
+		d := h.ok("e2e", "react", "--msg", "7", "--emoji", "👍", "--wait", "reaction", "--timeout", "3")
+		if m := waitOf(d)["message"].(map[string]any); len(m["reactions"].([]any)) != 2 {
+			t.Fatalf("wait = %v", waitOf(d))
+		}
+	})
+}
+
+// A send's reaction wait watches the message it sent: not the reply-to target,
+// not other recent messages.
+func TestE2ESendReactionWaitWatchesTheSentMessage(t *testing.T) {
+	for _, args := range [][]string{{}, {"--reply-to", "5"}} {
+		h := newE2EHarness(t, "@my_test_bot")
+		h.bot.Add(tgclient.BotMessage{ID: 5, From: "me", Text: "earlier"})
+		h.bot.OnWrite = func(tgfake.E2EWrite) { botReacts(h.bot, 5, "👍") } // unrelated
+		sleeps, sleep := 0, h.app.Sleep
+		h.app.Sleep = func(ctx context.Context, d time.Duration) error {
+			if sleeps++; sleeps == 2 {
+				botReacts(h.bot, h.bot.NextID, "👀")
+			}
+			return sleep(ctx, d)
+		}
+		cmd := append([]string{"e2e", "send", "text", "hi", "--wait", "reaction", "--timeout", "8"}, args...)
+		d := h.ok(cmd...)
+		m := d["wait"].(map[string]any)["message"].(map[string]any)
+		if m["id"] != float64(h.bot.NextID) {
+			t.Fatalf("%v: wait = %v", args, d["wait"])
+		}
+	}
+}
+
+// Reply and draft waits count only what comes after the write, whatever
+// message the write acted on.
+func TestE2EReplyWaitAfterReactIgnoresOlderBotMessages(t *testing.T) {
+	h := newE2EHarness(t, "@my_test_bot")
+	h.bot.Add(tgclient.BotMessage{ID: 10, From: "me", Text: "q"}, tgclient.BotMessage{ID: 20, From: "bot", Text: "old answer"})
+	h.fail(output.ExitTimeout, output.CodeTimeout, "e2e", "react", "--msg", "10", "--emoji", "👍", "--wait", "reply", "--timeout", "3")
+	h.fail(output.ExitTimeout, output.CodeTimeout, "e2e", "react", "--msg", "10", "--emoji", "👍", "--wait", "draft", "--all", "--timeout", "3")
+}
+
+// The guard hook's model of cobra: a flag the root command doesn't define takes
+// the next word as its value there, even when the subcommand declares it bool.
+func TestE2EUnknownRootFlagEatsTheNextWord(t *testing.T) {
+	h := newE2EHarness(t, "@my_test_bot")
+	// "me" is the text, not the command: this is e2e send text --all me
+	e := h.fail(output.ExitE2E, output.CodeE2ERefused, "--all", "me", "e2e", "send", "text", "--chat", "@other_bot")
+	if e.Details["chat"] != "@other_bot" {
+		t.Errorf("details = %v", e.Details)
+	}
+}
+
+// The allow-list is read again once the account lock is held: a bot disallowed
+// while the command waited for the lock gets nothing.
+func TestE2EDisallowWhileQueuedForTheLock(t *testing.T) {
+	h := newE2EHarness(t, "@my_test_bot")
+	connect := h.app.ConnectE2E
+	h.app.ConnectE2E = func(ctx context.Context, o tgclient.Options, fn func(context.Context, tgclient.E2E) error) error {
+		// what e2e disallow does while this command waits for the lock
+		cfg, err := h.app.Paths.LoadConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.E2E.AllowedChats = nil
+		if err := h.app.Paths.SaveConfig(cfg); err != nil {
+			t.Fatal(err)
+		}
+		return connect(ctx, o, fn)
+	}
+	h.fail(output.ExitE2E, output.CodeE2ERefused, "e2e", "send", "text", "hi")
+	if len(h.bot.Writes) != 0 {
+		t.Fatalf("writes = %+v", h.bot.Writes)
+	}
+}

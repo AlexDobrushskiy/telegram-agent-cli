@@ -179,3 +179,38 @@ func TestCodexOtherTools(t *testing.T) {
 		t.Error("reading ~/.codex/hooks.json asked")
 	}
 }
+
+// Review r1: holes in the e2e/Codex additions.
+func TestE2EGuardReviewHoles(t *testing.T) {
+	o := e2eOptions()
+	o.CodexHome = "/work/codex-home"
+	ask := []string{
+		// interpreter code writing a Codex hook config
+		`python3 -c 'open("/xhome/u/.codex/hooks.json", "w").write("{}")'`,
+		`node -e 'require("fs").writeFileSync(process.env.HOME + "/.codex/config.toml", "")'`,
+		`python3 -c 'open("/work/codex-home/hooks.json", "w").write("{}")'`,
+		// e2e's bool flags are unknown to the root command: there cobra takes the
+		// next word as their value, so "me" is not the command
+		"telegram-agent-cli --all me e2e send text --chat @other_bot",
+		"telegram-agent-cli --remove me e2e send text --chat @other_bot",
+		"telegram-agent-cli --keyboard me e2e send text --chat @other_bot",
+		"telegram-agent-cli --menu me e2e send text --chat @other_bot",
+		"telegram-agent-cli --main me e2e send text --chat @other_bot",
+		"telegram-agent-cli e2e --all react send text --chat @other_bot",
+	}
+	for _, c := range ask {
+		if len(CheckBash(c, o)) == 0 {
+			t.Errorf("CheckBash(%q) allowed, want ask", c)
+		}
+	}
+	patch := Input{ToolName: "apply_patch", ToolInput: map[string]any{
+		"input": "*** Begin Patch\n*** Update File: /work/codex-home/hooks.json\n*** End Patch"}}
+	if EvaluateCodex(patch, o) == "" {
+		t.Error("apply_patch of $CODEX_HOME/hooks.json passed")
+	}
+	rel := Input{ToolName: "apply_patch", Cwd: "/work", ToolInput: map[string]any{
+		"input": "*** Begin Patch\n*** Update File: codex-home/config.toml\n*** End Patch"}}
+	if EvaluateCodex(rel, o) == "" {
+		t.Error("apply_patch of $CODEX_HOME/config.toml by a relative path passed")
+	}
+}
