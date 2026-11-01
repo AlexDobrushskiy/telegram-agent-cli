@@ -289,22 +289,40 @@ func (s *scanner) interpreter(name string, args []token, cmd *command, c ctx) {
 
 // stdinCode analyses what a shell (asShell) or interpreter reads on stdin.
 func (s *scanner) stdinCode(cmd *command, c ctx, asShell bool) {
-	if cmd == nil {
-		return
-	}
-	run := func(text string) {
+	s.stdinText(cmd, c, asShell)
+	s.stdinFiles(cmd, c, asShell)
+}
+
+func (s *scanner) stdinRun(c ctx, asShell bool) func(string) {
+	return func(text string) {
 		if asShell {
 			s.str(text, c)
 		} else {
 			s.code(text, c)
 		}
 	}
+}
+
+// stdinText analyses heredocs and here-strings fed to stdin.
+func (s *scanner) stdinText(cmd *command, c ctx, asShell bool) {
+	if cmd == nil {
+		return
+	}
+	run := s.stdinRun(c, asShell)
 	for _, h := range cmd.heredocs {
 		run(h.body)
 	}
 	for _, hs := range cmd.herestrings {
 		run(hs.text)
 	}
+}
+
+// stdinFiles analyses a pipe or redirected file fed to stdin.
+func (s *scanner) stdinFiles(cmd *command, c ctx, asShell bool) {
+	if cmd == nil {
+		return
+	}
+	run := s.stdinRun(c, asShell)
 	if len(cmd.heredocs) == 0 && len(cmd.herestrings) == 0 && cmd.pipeIn {
 		s.pipedIn(cmd, c, run)
 	}

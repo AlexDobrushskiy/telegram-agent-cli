@@ -114,6 +114,9 @@ type scanner struct {
 	// visible command links to the account
 	hiddenRs []hiddenReason
 	st       pathState
+	// remote > 0 while scanning a command ssh runs on another host: its paths
+	// name that host's files, so the local filesystem is not consulted
+	remote int
 }
 
 func newScanner(o Options) *scanner {
@@ -563,6 +566,9 @@ func (s *scanner) pipedIn(cmd *command, c ctx, run func(string)) {
 			}
 			if literal && len(args) > 0 {
 				for _, a := range args {
+					if s.remote > 0 {
+						continue // a file on the remote host
+					}
 					if b, err := s.o.ReadFile(s.abs(a.text)); err == nil {
 						run(string(b))
 					} else if !errorsIsNotExist(err) {
@@ -583,15 +589,16 @@ func pipeSource(p *command) string {
 	return "a pipe"
 }
 
-func (s *scanner) ssh(args []token, cmd *command, c ctx) {
-	host := false
+// sshCommand returns where the remote command starts in ssh's args (len(args)
+// when there is none) and whether a host was given.
+func sshCommand(args []token) (start int, host bool) {
 	for i := 0; i < len(args); i++ {
 		t := args[i].text
 		if t == "--" {
 			if !host {
 				continue
 			}
-			i++
+			return i + 1, true
 		} else if strings.HasPrefix(t, "-") {
 			if sshValues[t] {
 				i++
@@ -601,19 +608,31 @@ func (s *scanner) ssh(args []token, cmd *command, c ctx) {
 			host = true
 			continue
 		}
-		if rest := args[i:]; len(rest) > 0 {
-			for _, a := range rest {
-				if len(a.subs) > 0 {
-					s.hidden(reasonBuilt, s.subsDecode(a.subs))
-				}
+		return i, true
+	}
+	return len(args), host
+}
+
+func (s *scanner) ssh(args []token, cmd *command, c ctx) {
+	s.remote++
+	defer func() { s.remote-- }()
+	start, host := sshCommand(args)
+	if rest := args[start:]; len(rest) > 0 {
+		for _, a := range rest {
+			if len(a.subs) > 0 {
+				s.hidden(reasonBuilt, s.subsDecode(a.subs))
 			}
-			s.str(joinWords(rest), c)
-			return
 		}
+		s.str(joinWords(rest), c)
+		return
 	}
 	if host {
 		s.terminalStdin("ssh", args, cmd, sshNoShell)
-		s.stdinCode(cmd, c, true)
+		s.stdinText(cmd, c, true)
+		// a redirected or piped file is read on this host
+		s.remote--
+		s.stdinFiles(cmd, c, true)
+		s.remote++
 	}
 }
 
@@ -664,6 +683,9 @@ func (s *scanner) file(p string, mode fileMode, c ctx) {
 	}
 	s.files[full] = true
 	content, ok := s.written[full]
+	if !ok && s.remote > 0 {
+		return // a script on the remote host
+	}
 	if !ok {
 		b, err := s.o.ReadFile(full)
 		if errors.Is(err, errTooBig) && bytes.IndexByte(b, 0) >= 0 {

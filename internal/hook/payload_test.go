@@ -316,12 +316,13 @@ func TestCodexTerminalStdin(t *testing.T) {
 func TestStdinRedirectScript(t *testing.T) {
 	o := e2eOptions()
 	for c, want := range map[string]string{
-		"bash < scripts/bad.sh":       "send text",
-		"sh </work/scripts/bad.sh":    "send text",
-		"zsh -s < scripts/bad":        "auth logout",
-		"bash < $SCRIPT":              "",
-		"python3 < scripts/bad.py":    "send text",
-		"ssh black-lan < scripts/bad": "auth logout",
+		"bash < scripts/bad.sh":           "send text",
+		"sh </work/scripts/bad.sh":        "send text",
+		"zsh -s < scripts/bad":            "auth logout",
+		"bash < $SCRIPT":                  "",
+		"python3 < scripts/bad.py":        "send text",
+		"ssh black-lan < scripts/bad":     "auth logout",
+		"cat scripts/bad | ssh black-lan": "auth logout",
 	} {
 		r := strings.Join(CheckBash(c+" && telegram-agent-cli me", o), "; ")
 		if want == "" {
