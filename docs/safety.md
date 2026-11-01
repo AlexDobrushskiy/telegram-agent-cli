@@ -98,6 +98,13 @@ Five layers, each independent:
   script) is only flagged when it is decoded on the way in or the visible command links to the
   account. Obfuscated content with no visible link to the tool isn't caught; the binary's own write
   gate (`TGAC_READONLY`) is the main barrier.
+- **Opaque or encoded execution passes.** When the visible text of a call never names
+  `telegram-agent-cli`, a `TGAC_` variable, the data dir or a protected settings path, the hook has
+  nothing to decide on and stays silent. Examples: `eval "$CMD"`, `bash -c "$CMD"`, `"$BIN" e2e send …`,
+  `python3 -c 'import base64; exec(base64.b64decode("…"))'`, `bash /tmp/x.sh` or `python3 x.py` for a
+  script that doesn't exist yet, an unknown tool running opaque code. Each of these can send from the
+  account if the session file is readable and `TGAC_READONLY` is off. Encoded payloads are not
+  decoded, except a shell decode feeding a shell (`eval "$(… | base64 -d)"`), which asks.
 - The prompt is a question to you, not your approval. In `bypassPermissions` mode it is the only
   thing between the agent and the command, so read each one before approving.
 
@@ -141,21 +148,11 @@ What Codex sends (codex-cli 0.165, captured from `codex exec` and the TUI): ever
 a patch as `{"tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch…"}}`; an MCP call
 as `mcp__<server>__<tool>` with its JSON arguments, or the raw argument string when they don't
 parse. `write_stdin` (typing into a running command) and code mode's `wait` send no `PreToolUse`.
-So the Codex hook:
-
-- applies the Bash checks to every shell shape: `Bash`, `exec_command`/`functions.exec_command`
-  with `cmd`, `shell`/`local_shell`/`container.exec` with an argv array, and a `command`/`cmd`
-  field of any other tool. `code`/`script` fields (node_repl's `js` tool) get the
-  interpreter-code checks;
-- denies a shell, REPL, `ssh HOST` or `tmux` session started on the terminal (`zsh`, `bash -i`,
-  `python3`, `node`, `tmux new`), since what is typed into it later is never checked. Pipes,
-  heredocs, `<` redirects, `-c`, scripts, `--version` and `ssh -N` pass;
-- for `apply_patch` and MCP calls, denies input that names a data dir, a Claude settings file or a
-  Codex hook config, patches whose files (resolved against the cwd) are one, and any other input
-  of an unknown tool that names the binary or a `TGAC_` variable (`spawn_agent` and other
-  agent-to-agent text excepted: those agents run under the same hook);
-- denies a payload it can't read (not JSON, no tool name, a shell tool without a string or argv
-  command), and a call it fails to check.
+The Codex hook makes the same decisions as the Claude Code hook ([what a payload is checked
+for](#what-the-hook-reads-in-a-payload)), as `deny`. It also denies a shell, REPL, `ssh HOST` or
+`tmux` session started on the terminal (`zsh`, `bash -i`, `python3`, `node`, `tmux new`), since what
+is typed into it later is never checked. Pipes, heredocs, `<` redirects, `-c`, scripts, `--version`
+and `ssh -N` pass.
 
 Codex hook configs (`hooks.json` and `config.toml` in any `.codex` dir and in `$CODEX_HOME`) are
 protected like Claude Code settings, including from interpreter code (`python3 -c 'open(...)'`)
@@ -176,8 +173,7 @@ Set `TGAC_READONLY=1` in Codex's shell environment as well (`[shell_environment_
 `hook install` edits `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`, or
 `--settings PATH`). It sets `env.TGAC_READONLY` to `"1"` and adds three `PreToolUse` entries, matcher
 `Bash|Monitor`, matcher `Read|Edit|Write|MultiEdit|NotebookEdit|Grep` and matcher
-`mcp__.*|PowerShell` (MCP tools that carry a `command`, `cmd`, `code` or `script` field get the
-Bash or interpreter-code checks; other MCP calls pass), each running
+`mcp__.*|PowerShell` (MCP calls get the checks [below](#what-the-hook-reads-in-a-payload)), each running
 `<absolute path of this binary> hook claude-pretooluse` with `"timeout": 10` and
 `"onFailure": "block"`. That fails closed: if the hook cannot start, crashes or times out, the tool
 call is blocked. `onFailure` needs Claude Code 2.1.295 or later; older versions ignore it and let the
@@ -195,6 +191,34 @@ settings. Use `--binary PATH` when the binary is reached through a package manag
 For other agent harnesses, the hook reads Claude Code's PreToolUse JSON on stdin
 (`{"tool_name":"Bash","tool_input":{"command":"…"},"cwd":"…"}`) and prints
 `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"…"}}`
-or nothing; it always exits 0. A payload it can't read gets "ask" too (fail closed), as does a
-shell tool (`Bash`, `exec_command`, `shell`…) whose command isn't a string or an argv array.
-`hook claude-pretooluse --help` prints its own help.
+or nothing; it always exits 0. `hook claude-pretooluse --help` prints its own help.
+
+## What the hook reads in a payload
+
+Both hooks (Claude Code: ask, Codex: deny) decide on every string a payload carries:
+
+- **Shell tools** (`Bash`, `PowerShell`, `exec_command`, `shell`, `local_shell`, `container.exec`,
+  `shell_command`…, with or without `functions.`): the Bash checks on each `command` and `cmd`
+  field (both are read when both are present), string or argv array. `workdir` is the cwd for
+  relative paths. Other fields (except `description`/`justification`) are scanned as below.
+- **File tools** (`Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Grep`): path and content
+  checks. A file tool without a path is unreadable.
+- **`apply_patch`**: the files a patch adds, updates, deletes or moves to, resolved against the cwd.
+- **Any other tool** (MCP, unknown names): `command`/`cmd` get the Bash checks, `code`/`script`
+  the interpreter-code checks. Every other string, nested or JSON-encoded, is scanned: it asks when it
+  names the binary or a `TGAC_` variable (except text to agents and the user: `Agent`, `Task`,
+  `spawn_agent`, `WebSearch`…), the data dir, a Claude settings file or a Codex hook config, or a
+  path field (`path`, `file_path`, `destination`…) inside one. A Telegram tool (`telegram` or `tgac`
+  in its name, or a dispatch naming such a server) asks unless its name starts with a read verb
+  (`get_`, `list_`, `search_`…); the only unprompted write path is `telegram-agent-cli e2e`. A tool
+  named as a runner (`exec`, `shell`, `bash`, `eval`, `repl`, `command`…) without a readable command
+  or code field asks.
+- **Fields beside `tool_input`** other than call metadata (`session_id`, `transcript_path`, `cwd`,
+  `permission_mode`, `model`…) are scanned the same way.
+- **Fail closed.** A payload that isn't one JSON object, has no tool name, or whose `tool_input` is a
+  number, an array or JSON-looking text that isn't one object asks. So does a shell tool without a
+  string or argv command, a command or code field of another type, and a call the guard fails to
+  check in time. A `tool_input` that is a JSON string holding an object is read as that object; any
+  other string is read as a command (Codex sends MCP arguments it can't parse that way).
+
+What stays silent: calls whose text names nothing above (see **Limits**, opaque execution).

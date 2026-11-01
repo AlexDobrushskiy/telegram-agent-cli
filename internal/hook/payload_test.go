@@ -253,7 +253,7 @@ func TestCodeAndUnknownTools(t *testing.T) {
 			}
 		}
 	}
-	// other inputs naming the binary: Codex denies, Claude (Agent prompts, notes) stays silent
+	// other inputs naming the binary: the guard can't tell what the tool does with them
 	for _, p := range []string{
 		payload("mcp__x__y", map[string]any{"q": "telegram-agent-cli send text --chat 1"}),
 		payload("mcp__x__y", map[string]any{"steps": []any{map[string]any{"run": "TGAC_READONLY=0 x"}}}),
@@ -261,8 +261,8 @@ func TestCodeAndUnknownTools(t *testing.T) {
 		if got := hookCall(t, true, o, p); got != "deny" {
 			t.Errorf("codex %s: %q, want deny", p, got)
 		}
-		if got := hookCall(t, false, o, p); got != "" {
-			t.Errorf("claude %s: %q, want no decision", p, got)
+		if got := hookCall(t, false, o, p); got != "ask" {
+			t.Errorf("claude %s: %q, want ask", p, got)
 		}
 	}
 	// prompts to agents that run under the same hooks (Codex spawn_agent, Claude Agent)
@@ -336,5 +336,85 @@ func TestStdinRedirectScript(t *testing.T) {
 	}
 	if r := CheckBash("bash < scripts/ok.sh", o); len(r) != 0 {
 		t.Errorf("harmless script on stdin: %v", r)
+	}
+}
+
+// e2e r2: every string a payload carries is decided, on both hooks, without
+// asking about the ordinary calls around it.
+func TestEveryFieldDecided(t *testing.T) {
+	o := e2eOptions()
+	raw := func(m map[string]any) string {
+		b, _ := json.Marshal(m)
+		return string(b)
+	}
+	jsonStr := func(v any) string {
+		b, _ := json.Marshal(v)
+		return string(b)
+	}
+	block := []string{
+		// JSON-string tool_input is the object it encodes
+		payload("Bash", jsonStr(map[string]any{"command": sendOther})),
+		payload("Write", jsonStr(map[string]any{"file_path": testDir + "/config.json", "content": "{}"})),
+		payload("Bash", "{not json"),
+		payload("Bash", `["telegram-agent-cli","auth","logout"]`),
+		// both command fields are read
+		payload("exec_command", map[string]any{"cmd": sendOther, "command": sendOK}),
+		payload("Bash", map[string]any{"command": sendOK, "cmd": sendOther}),
+		// a shell tool's cwd counts for its relative paths
+		payload("exec_command", map[string]any{"cmd": "cat session.json", "workdir": testDir}),
+		// fields beside tool_input
+		raw(map[string]any{"tool_name": "Edit", "arguments": map[string]any{"file_path": testDir + "/config.json"}}),
+		raw(map[string]any{"tool_name": "Bash", "tool_input": map[string]any{"command": "ls"}, "input": map[string]any{"cmd": sendOther}}),
+		// Telegram tools act on the account unless they only read
+		payload("mcp__telegram__send_message", map[string]any{"chat_id": "@my_test_bot", "text": "x"}),
+		payload("call_tool", map[string]any{"server": "telegram", "name": "send_message", "arguments": map[string]any{}}),
+		// file tools of MCP servers and others write where their path says
+		payload("mcp__filesystem__write_file", map[string]any{"path": testHome + "/.claude/settings.json", "content": "{}"}),
+		raw(map[string]any{"tool_name": "mcp__fs__move_file", "cwd": testDir,
+			"tool_input": map[string]any{"source": "/tmp/x", "destination": "config.json"}}),
+		payload("apply_patch", map[string]any{"input": "*** Begin Patch\n*** Add File: " + testDir + "/peers.json\n+{}\n*** End Patch"}),
+		// a runner whose command the guard can't read
+		payload("functions.exec", map[string]any{}),
+		payload("mcp__terminal__execute", nil),
+		payload("mcp__x__y", 42),
+		payload("mcp__x__y", map[string]any{"code": []any{"x"}}),
+		// nested and JSON-encoded strings are read too
+		payload("multi_tool_use.parallel", map[string]any{"tool_uses": []any{map[string]any{"parameters": jsonStr(map[string]any{"cmd": sendOther})}}}),
+		payload("write_stdin", map[string]any{"session_id": 1, "chars": "TGAC_READONLY=0 x\n"}),
+	}
+	o.Cwd = "" // the payload's cwd, as in the installed hook
+	for _, p := range block {
+		if got := hookCall(t, false, o, p); got != "ask" {
+			t.Errorf("claude %.160s: %q, want ask", p, got)
+		}
+		if got := hookCall(t, true, o, p); got != "deny" {
+			t.Errorf("codex %.160s: %q, want deny", p, got)
+		}
+	}
+	pass := []string{
+		payload("Bash", jsonStr(map[string]any{"command": sendOK})),
+		payload("Bash", map[string]any{"command": sendOK, "description": "send an e2e ping with telegram-agent-cli"}),
+		payload("exec_command", map[string]any{"cmd": sendOK, "command": "telegram-agent-cli e2e status"}),
+		payload("exec_command", map[string]any{"cmd": "ls", "workdir": testHome + "/.claude"}),
+		raw(map[string]any{"tool_name": "Bash", "tool_input": map[string]any{"command": "ls"}, "session_id": "s",
+			"transcript_path": testHome + "/.claude/projects/x/s.jsonl", "permission_mode": "default", "effort": map[string]any{"level": "high"}}),
+		payload("mcp__telegram__get_messages", map[string]any{"chat_id": "me"}),
+		payload("mcp__notion__create_page", map[string]any{"name": "telegram notes", "body": "about the bot"}),
+		payload("mcp__filesystem__read_file", map[string]any{"path": testHome + "/.claude/CLAUDE.md"}),
+		payload("mcp__filesystem__write_file", map[string]any{"path": "/work/notes.md", "content": "x"}),
+		payload("mcp__pw-lane__browser_snapshot", map[string]any{}),
+		payload("mcp__desktop_commander__list_processes", nil),
+		payload("mcp__desktop_commander__start_process", map[string]any{"command": "ls -la", "timeout_ms": 1000}),
+		payload("mcp__x__y", "plain words"),
+		payload("Agent", map[string]any{"prompt": "run telegram-agent-cli e2e status", "subagent_type": "x"}),
+		payload("WebSearch", map[string]any{"query": "telegram-agent-cli TGAC_READONLY"}),
+		payload("apply_patch", map[string]any{"command": "*** Begin Patch\n*** Add File: /work/a.md\n+telegram-agent-cli e2e send\n*** End Patch"}),
+	}
+	for _, p := range pass {
+		for _, codex := range []bool{false, true} {
+			if got := hookCall(t, codex, o, p); got != "" {
+				t.Errorf("codex=%v %.160s: %q, want no decision", codex, p, got)
+			}
+		}
 	}
 }
