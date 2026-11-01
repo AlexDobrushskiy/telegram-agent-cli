@@ -165,12 +165,12 @@ func (s *scanner) argvList(text string, lits []lit, i int) {
 		}
 		switch rest[0] {
 		case ']', ')', '}':
-			s.reasons.add(checkInvocation(args))
+			s.reasons.add(checkInvocation(args, s.o))
 			return
 		case ',':
 			rest = strings.TrimLeft(rest[1:], " \t\r\n\\")
 			if rest != "" && strings.IndexByte("])}", rest[0]) >= 0 {
-				s.reasons.add(checkInvocation(args))
+				s.reasons.add(checkInvocation(args, s.o))
 				return
 			}
 			if k >= len(lits) || lits[k].start != len(text)-len(rest) {

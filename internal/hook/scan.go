@@ -423,7 +423,7 @@ func (s *scanner) argv(words []token, cmd *command, c ctx) {
 	args = xargsArgs(words[:idx], args)
 	switch {
 	case strings.EqualFold(name, BinaryName):
-		s.reasons.add(checkInvocation(args))
+		s.reasons.add(checkInvocation(args, s.o))
 	case name == "parallel":
 		s.parallel(args, c)
 	case name == "watch":
@@ -623,7 +623,7 @@ func (s *scanner) goRun(args []token, c ctx) {
 		}
 		pkg = strings.TrimSuffix(pkg, "/")
 		if base(pkg) == BinaryName || (strings.HasPrefix(pkg, ".") && base(absPath(pkg, s.o)) == BinaryName) {
-			s.reasons.add(checkInvocation(args[j+1:]))
+			s.reasons.add(checkInvocation(args[j+1:], s.o))
 			return
 		}
 		for ; j < len(args) && strings.HasSuffix(args[j].text, ".go"); j++ {

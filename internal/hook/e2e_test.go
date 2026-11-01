@@ -9,8 +9,14 @@ import (
 // e2e writes to allow-listed bots pass silently (the binary enforces the list);
 // every way of changing that list asks, so an agent cannot add a chat and then
 // send there without the owner's OK.
-func TestE2EGuard(t *testing.T) {
+func e2eOptions() Options {
 	o := testOptions()
+	o.E2EAllowed = []string{"@my_test_bot"}
+	return o
+}
+
+func TestE2EGuard(t *testing.T) {
+	o := e2eOptions()
 	pass := []string{
 		`telegram-agent-cli e2e send text "e2e ping 42"`,
 		"telegram-agent-cli e2e send text --chat @my_test_bot --message hi --wait reply --timeout 20",
@@ -28,6 +34,11 @@ func TestE2EGuard(t *testing.T) {
 		"telegram-agent-cli e2e read pinned",
 		"telegram-agent-cli e2e wait --for reply --timeout 20",
 		"telegram-agent-cli e2e status",
+		"telegram-agent-cli e2e send text hi --chat=my_test_bot",
+		"telegram-agent-cli e2e react --chat MY_TEST_BOT --msg 1 --emoji 👍",
+		"telegram-agent-cli e2e stop --chat https://t.me/my_test_bot --draft 5",
+		"telegram-agent-cli e2e read messages --chat 12345",
+		"telegram-agent-cli e2e wait --for reply --chat @anyone",
 		"telegram-agent-cli e2e --help",
 		"telegram-agent-cli e2e",
 	}
@@ -37,6 +48,12 @@ func TestE2EGuard(t *testing.T) {
 		}
 	}
 	ask := map[string]string{
+		// an e2e write to a chat that is not literally on the list
+		"telegram-agent-cli e2e send text hi --chat 337053497":              "not an e2e.allowed_chats entry",
+		"telegram-agent-cli e2e send text hi --chat=@other_bot":             "not an e2e.allowed_chats entry",
+		"telegram-agent-cli e2e press --msg 1 --button B --chat me":         "not an e2e.allowed_chats entry",
+		"telegram-agent-cli e2e send text hi --chat $BOT":                   "expansion",
+		"telegram-agent-cli e2e send text hi --chat @my_test_bot --chat @x": "not an e2e.allowed_chats entry",
 		// changing the allow-list is a write, like a normal send
 		"telegram-agent-cli e2e allow @someone":                         "e2e allow",
 		"telegram-agent-cli e2e disallow @my_test_bot":                  "e2e disallow",
@@ -73,7 +90,7 @@ func TestE2EGuard(t *testing.T) {
 // Both guard paths: allow-listed e2e writes run with no decision (no prompt for
 // an unattended worker); other writes ask on Claude Code and are denied on Codex.
 func TestE2EGuardPaths(t *testing.T) {
-	o := testOptions()
+	o := e2eOptions()
 	for _, tc := range []struct {
 		name     string
 		run      func(r *strings.Reader, w *strings.Builder) error
@@ -108,6 +125,7 @@ func TestE2EGuardPaths(t *testing.T) {
 				"telegram-agent-cli e2e allow @someone",
 				"telegram-agent-cli e2e disallow @my_test_bot",
 				"TGAC_READONLY=0 telegram-agent-cli e2e send text hi",
+				"telegram-agent-cli e2e send text hi --chat 337053497",
 			} {
 				var d Decision
 				out := call(bash(cmd))
