@@ -200,25 +200,29 @@ Both hooks (Claude Code: ask, Codex: deny) decide on every string a payload carr
 - **Shell tools** (`Bash`, `PowerShell`, `exec_command`, `shell`, `local_shell`, `container.exec`,
   `shell_command`…, with or without `functions.`): the Bash checks on each `command` and `cmd`
   field (both are read when both are present), string or argv array. `workdir` is the cwd for
-  relative paths. Other fields (except `description`/`justification`) are scanned as below.
+  relative paths. A command that only reads or prints passes, as before.
 - **File tools** (`Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Grep`): path and content
   checks. A file tool without a path is unreadable.
 - **`apply_patch`**: the files a patch adds, updates, deletes or moves to, resolved against the cwd.
 - **Any other tool** (MCP, unknown names): `command`/`cmd` get the Bash checks, `code`/`script`
-  the interpreter-code checks. Every other string, nested or JSON-encoded, is scanned: it asks when it
-  names the binary or a `TGAC_` variable (except text to agents and the user: `Agent`, `Task`,
-  `spawn_agent`, `WebSearch`…), the data dir, a Claude settings file or a Codex hook config, or a
-  path field (`path`, `file_path`, `destination`…) inside one. A Telegram tool (`telegram` or `tgac`
-  in its name, or a dispatch naming such a server) asks unless its name starts with a read verb
-  (`get_`, `list_`, `search_`…); the only unprompted write path is `telegram-agent-cli e2e`. A tool
-  named as a runner (`exec`, `shell`, `bash`, `eval`, `repl`, `command`…) without a readable command
-  or code field asks.
-- **Fields beside `tool_input`** other than call metadata (`session_id`, `transcript_path`, `cwd`,
-  `permission_mode`, `model`…) are scanned the same way.
-- **Fail closed.** A payload that isn't one JSON object, has no tool name, or whose `tool_input` is a
-  number, an array or JSON-looking text that isn't one object asks. So does a shell tool without a
-  string or argv command, a command or code field of another type, and a call the guard fails to
-  check in time. A `tool_input` that is a JSON string holding an object is read as that object; any
-  other string is read as a command (Codex sends MCP arguments it can't parse that way).
+  the interpreter-code checks. Every string, nested or JSON-encoded, is read by its role: a nested
+  object with a `command`/`cmd`/`code`/`script` field (parallel tool uses, a dispatch) gets the same
+  checks; terminal input (`write_stdin`'s `chars`) gets the Bash checks; setting a `TGAC_` variable
+  (`TGAC_READONLY=0`, or one as an env key) asks; naming the data dir, a Claude settings file or a
+  Codex hook config, or a path field (`path`, `file_path`, `destination`…) inside one, asks. Other
+  text is data: a search query or a path that mentions `telegram-agent-cli` passes. A Telegram tool
+  (`telegram` or `tgac` in its name, or a dispatch naming such a server) asks unless its name starts
+  with a read verb (`get_`, `list_`, `search_`…); the only unprompted write path is
+  `telegram-agent-cli e2e`. A tool named as a runner (`exec`, `shell`, `bash`, `eval`, `repl`,
+  `command`…) without a readable command or code field asks.
+- **Fields beside `tool_input`** are call metadata (`session_id`, `scratchpad_dir`, `cwd`…) and are
+  not read. A payload carrying the input in another envelope (`arguments`, `input`, `parameters`…)
+  is a shape the guard can't read.
+- **Fail closed.** A payload that isn't one JSON object, has no tool name, carries such an envelope,
+  or whose `tool_input` is a number, an array or JSON-looking text that isn't one object asks. So
+  does a shell tool without a string or argv command, a command or code field of another type, and
+  a call the guard fails to check in time. A `tool_input` that is a JSON string holding an object is
+  read as that object; any other string is read as a command or code (Codex sends MCP arguments it
+  can't parse that way), and asks when it names the binary or a `TGAC_` variable.
 
 What stays silent: calls whose text names nothing above (see **Limits**, opaque execution).

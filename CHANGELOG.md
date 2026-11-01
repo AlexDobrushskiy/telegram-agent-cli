@@ -24,11 +24,11 @@ All notable changes to this project are documented here. The format follows
   `code` fields get the Bash or interpreter-code checks. `hook install` adds a third matcher,
   `mcp__.*|PowerShell`; run it again to pick it up.
 - The hooks decide on every string a payload carries, the same way for Claude Code and Codex:
-  JSON-string `tool_input`, both `command` and `cmd`, nested and JSON-encoded fields, fields beside
-  `tool_input`. MCP and unknown tools ask when their input names the binary, `TGAC_`, the data dir,
-  a settings or Codex hook file, or a path inside one; Telegram tools ask unless they read; runners
-  without a readable command ask. Opaque execution that names none of these still passes
-  (`docs/safety.md`, Limits).
+  JSON-string `tool_input`, both `command` and `cmd`, nested and JSON-encoded fields by their role
+  (commands, code, terminal input, `TGAC_` settings, protected paths). Telegram tools ask unless
+  they read; runners without a readable command ask; input in an unknown envelope asks. Plain text
+  that mentions the binary, and call metadata, stay data. Opaque execution that names none of these
+  still passes (`docs/safety.md`, Limits).
 - A shell or interpreter reading a script through `<` (`bash < x.sh`) gets the script checked.
 
 ## [0.1.3] - 2026-10-29

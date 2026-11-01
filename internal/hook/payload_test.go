@@ -253,16 +253,19 @@ func TestCodeAndUnknownTools(t *testing.T) {
 			}
 		}
 	}
-	// other inputs naming the binary: the guard can't tell what the tool does with them
-	for _, p := range []string{
-		payload("mcp__x__y", map[string]any{"q": "telegram-agent-cli send text --chat 1"}),
-		payload("mcp__x__y", map[string]any{"steps": []any{map[string]any{"run": "TGAC_READONLY=0 x"}}}),
+	// setting a TGAC_ variable anywhere asks; naming the binary in a data field
+	// of a parseable payload (a search query, a path) is data
+	for p, want := range map[string]bool{
+		payload("mcp__x__y", map[string]any{"steps": []any{map[string]any{"run": "TGAC_READONLY=0 x"}}}): true,
+		payload("mcp__x__y", map[string]any{"env": map[string]any{"TGAC_READONLY": "0"}}):                true,
+		payload("mcp__x__y", map[string]any{"q": "telegram-agent-cli send text --chat 1"}):               false,
 	} {
-		if got := hookCall(t, true, o, p); got != "deny" {
-			t.Errorf("codex %s: %q, want deny", p, got)
+		deny, ask := map[bool]string{true: "deny"}[want], map[bool]string{true: "ask"}[want]
+		if got := hookCall(t, true, o, p); got != deny {
+			t.Errorf("codex %s: %q, want %q", p, got, deny)
 		}
-		if got := hookCall(t, false, o, p); got != "ask" {
-			t.Errorf("claude %s: %q, want ask", p, got)
+		if got := hookCall(t, false, o, p); got != ask {
+			t.Errorf("claude %s: %q, want %q", p, got, ask)
 		}
 	}
 	// prompts to agents that run under the same hooks (Codex spawn_agent, Claude Agent)

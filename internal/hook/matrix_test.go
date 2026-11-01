@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -73,5 +74,43 @@ func TestE2ER2Matrix(t *testing.T) {
 	}
 	if err := sc.Err(); err != nil || n != 578 {
 		t.Fatalf("read %d cases: %v", n, err)
+	}
+}
+
+// Everyday calls in the envelope interactive Claude Code 2.1.307 sends (its
+// scratchpad_dir and cwd name a telegram-agent-cli checkout) get main's
+// decision on both hooks. Main asks on e2e commands only because it has no
+// e2e: those pass (the exact allow-listed send of fix r3 included).
+func TestEverydayCorpusMatchesMain(t *testing.T) {
+	b, err := os.ReadFile("testdata/readonly-corpus.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var corpus []struct{ Payload, Main string }
+	if err := json.Unmarshal(b, &corpus); err != nil || len(corpus) < 60 {
+		t.Fatalf("corpus: %d entries, %v", len(corpus), err)
+	}
+	o := matrixOptions()
+	o.UserHome, o.DataDirs, o.Cwd = "/Users/u", []string{"/Users/u/.config/telegram-agent-cli"}, ""
+	for _, c := range corpus {
+		var in struct {
+			ToolName  string         `json:"tool_name"`
+			ToolInput map[string]any `json:"tool_input"`
+		}
+		_ = json.Unmarshal([]byte(c.Payload), &in)
+		cmd, _ := in.ToolInput["command"].(string)
+		want := c.Main
+		if strings.HasPrefix(cmd, "telegram-agent-cli e2e ") {
+			want = ""
+		}
+		for _, codex := range []bool{false, true} {
+			w := want
+			if codex && w == "ask" {
+				w = "deny"
+			}
+			if got := hookCall(t, codex, o, c.Payload); got != w {
+				t.Errorf("codex=%v %s %v: %q, want %q (main %q)", codex, in.ToolName, in.ToolInput, got, w, c.Main)
+			}
+		}
 	}
 }

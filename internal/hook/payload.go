@@ -6,10 +6,11 @@ import (
 	"strings"
 )
 
-// metaKeys are the payload fields that describe a call (Claude Code and
-// Codex), not what it does. Every other top-level field is scanned.
-var metaKeys = set("hook_event_name", "tool_name", "tool_input", "cwd", "session_id", "transcript_path",
-	"permission_mode", "tool_use_id", "model", "turn_id", "effort", "prompt_id", "agent_id", "agent_type")
+// inputKeys are envelopes that carry a tool's input under another name; a
+// payload with one is a shape the guard can't read. Other top-level fields
+// are call metadata (session_id, scratchpad_dir…, a set that grows with each
+// harness version) and are not read.
+var inputKeys = set("arguments", "input", "parameters", "params", "args", "tool_args", "tool_arguments")
 
 // parseInput reads a payload; ok is false when the guard can't tell the tool
 // or its input.
@@ -21,19 +22,13 @@ func parseInput(raw []byte) (in Input, ok bool) {
 	if c, has := p["cwd"]; has && string(c) != "null" && json.Unmarshal(c, &in.Cwd) != nil {
 		return in, false
 	}
+	for k := range p {
+		if inputKeys[k] {
+			return in, false
+		}
+	}
 	if in.ToolInput, in.wrapped, ok = decodeToolInput(p["tool_input"]); !ok {
 		return in, false
-	}
-	for k, v := range p {
-		if metaKeys[k] {
-			continue
-		}
-		var x any
-		_ = json.Unmarshal(v, &x)
-		if in.extra == nil {
-			in.extra = map[string]any{}
-		}
-		in.extra[k] = x
 	}
 	return in, true
 }
@@ -109,59 +104,89 @@ func commandsOf(ti map[string]any) (cmds []string, present, ok bool) {
 	return cmds, present, ok && present
 }
 
-// noMention are tools whose text goes to an agent that runs under the same
-// hooks, to the user, or to the web: naming the binary there is not a call.
-var noMention = set("spawn_agent", "send_input", "send_message", "followup_task", "update_plan", "request_user_input",
-	"Agent", "Task", "SendMessage", "TodoWrite", "AskUserQuestion", "ExitPlanMode", "EnterPlanMode",
-	"WebSearch", "WebFetch", "ToolSearch", "Skill", "Glob")
-
 // pathKeys hold a file or directory path in a tool's input (MCP filesystem
 // servers, desktop-commander, unknown file tools).
 var pathKeys = set("path", "paths", "file_path", "filepath", "file", "filename", "notebook_path", "target",
 	"target_path", "destination", "dest", "source", "src", "directory", "dir", "new_path", "old_path")
 
-// fieldScan checks the strings of a tool input the tool-specific checks did
-// not decide: skip keys are not read at all, analysed keys only get the
-// path checks.
+// terminalKeys hold text typed into a running shell or REPL (write_stdin).
+var terminalKeys = set("chars", "stdin")
+
+// fieldScan checks the strings of an unknown tool's input by their role, at
+// any depth and inside JSON-encoded strings: a nested command or code field
+// (a call inside the call: parallel tool uses, a dispatch) gets the Bash or
+// code checks, terminal input the Bash checks, setting a TGAC_ variable asks,
+// and every string gets the protected-path checks. Other text is data.
 type fieldScan struct {
-	tool     string
-	o        Options
-	mention  bool
-	skip     map[string]bool
-	analysed map[string]bool
-	dirRes   []*regexp.Regexp
+	tool string
+	o    Options
+	// content: the input is file content (a patch); only its paths count.
+	content bool
+	dirRes  []*regexp.Regexp
 }
 
 // scan returns why the fields need the owner's OK ("" = nothing found).
+// The top level's command and code fields are checkOtherTool's.
 func (f fieldScan) scan(fields map[string]any) string {
 	f.dirRes = dirPatterns(f.o)
-	for k, v := range fields {
-		if f.skip[k] {
-			continue
+	return f.object(fields, true)
+}
+
+func (f fieldScan) object(m map[string]any, top bool) string {
+	if !top && !f.content {
+		if r := f.calls(m); r != "" {
+			return r
 		}
-		if r := f.value(k, v, !f.analysed[k]); r != "" {
+	}
+	for k, v := range m {
+		if !f.content && tgacKeyRe.MatchString(k) {
+			return f.tgacReason()
+		}
+		if r := f.value(k, v); r != "" {
 			return r
 		}
 	}
 	return ""
 }
 
-func (f fieldScan) value(key string, v any, mention bool) string {
-	switch x := v.(type) {
-	case map[string]any:
-		for k, e := range x {
-			if r := f.value(k, e, mention); r != "" {
-				return r
+// calls checks the command and code fields of a nested object.
+func (f fieldScan) calls(m map[string]any) string {
+	var rs reasonSet
+	cmds, present, ok := commandsOf(m)
+	if present && !ok {
+		return reasonUnreadable("a command inside this " + f.tool + " call")
+	}
+	for _, c := range cmds {
+		for _, r := range CheckBash(c, f.o) {
+			rs.add(r)
+		}
+	}
+	for _, k := range codeKeys {
+		if code, isStr := m[k].(string); isStr {
+			for _, r := range CheckCode(code, f.o) {
+				rs.add(r)
 			}
 		}
+	}
+	if len(rs.list) == 0 {
+		return ""
+	}
+	return "Telegram account action: needs the account owner's explicit OK for a call inside this " + f.tool +
+		" call (" + strings.Join(rs.list, "; ") + ")"
+}
+
+func (f fieldScan) value(key string, v any) string {
+	switch x := v.(type) {
+	case map[string]any:
+		return f.object(x, false)
 	case []any:
 		for _, e := range x {
-			if r := f.value(key, e, mention); r != "" {
+			if r := f.value(key, e); r != "" {
 				return r
 			}
 		}
 	case string:
-		if r := f.text(key, x, mention); r != "" {
+		if r := f.text(key, x); r != "" {
 			return r
 		}
 		if obj, isJSON := jsonObject(x); isJSON {
@@ -170,18 +195,40 @@ func (f fieldScan) value(key string, v any, mention bool) string {
 				if json.Unmarshal([]byte(strings.TrimSpace(x)), &arr) != nil {
 					return "" // not JSON after all: read as text above
 				}
-				return f.value(key, arr, mention)
+				return f.value(key, arr)
 			}
-			return f.value(key, obj, mention)
+			return f.object(obj, false)
 		}
 	}
 	return ""
 }
 
-func (f fieldScan) text(key, s string, mention bool) string {
-	if mention && f.mention && (mentionRe.MatchString(s) || strings.Contains(s, "TGAC_")) {
-		return "Telegram account action: this " + f.tool + " call names " + BinaryName +
-			" or a TGAC_ variable in input the guard can't analyse"
+var (
+	// invokeRe is the binary as a command word, bare or at the end of a path;
+	// a directory of that name (a checkout, telegram-agent-cli-wt/) is not one.
+	invokeRe = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_.-])` + regexp.QuoteMeta(BinaryName) +
+		"(?:$|[\\s'\"`;&|)\\]},])")
+	tgacVarRe = regexp.MustCompile(`\bTGAC_[A-Z]`)
+	// tgacSetRe sets a TGAC_ variable (TGAC_READONLY=0); tgacKeyRe is one as an env key.
+	tgacSetRe = regexp.MustCompile(`\bTGAC_[A-Z0-9_]+\s*\+?=`)
+	tgacKeyRe = regexp.MustCompile(`^TGAC_`)
+)
+
+func (f fieldScan) tgacReason() string {
+	return "Telegram account action: this " + f.tool + " call sets a TGAC_ variable (the guard's own switches)"
+}
+
+func (f fieldScan) text(key, s string) string {
+	if !f.content {
+		if tgacSetRe.MatchString(s) {
+			return f.tgacReason()
+		}
+		if terminalKeys[strings.ToLower(key)] {
+			if rs := CheckBash(s, f.o); len(rs) > 0 {
+				return "Telegram account action: this " + f.tool + " call types a command that needs the account owner's explicit OK (" +
+					strings.Join(rs, "; ") + ")"
+			}
+		}
 	}
 	for _, re := range f.dirRes {
 		if re.MatchString(s) {

@@ -16,8 +16,6 @@ type Input struct {
 	// wrapped: tool_input was a plain string (Codex sends MCP arguments it
 	// can't parse that way); it is kept under "command".
 	wrapped bool
-	// extra: top-level payload fields that aren't call metadata.
-	extra map[string]any
 }
 
 // shellTools are the tool names (any case, without a "functions." prefix)
@@ -35,9 +33,6 @@ var commandKeys = []string{"command", "cmd"}
 
 // codeKeys hold code a tool runs (node_repl's js, a browser's run-code tool).
 var codeKeys = []string{"code", "script"}
-
-// shellProse are shell-tool fields that describe the command to a person.
-var shellProse = set("description", "justification")
 
 var plainWordRe = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
 
@@ -84,9 +79,9 @@ func str(m map[string]any, keys ...string) string {
 	return ""
 }
 
-// Evaluate returns the ask reason for a tool call, or "" to stay silent. Every
-// string the payload carries is decided: the tool's own checks, then the
-// fields they don't read (unknown tools, extra fields beside tool_input).
+// Evaluate returns the ask reason for a tool call, or "" to stay silent. Shell
+// and file tools get their own checks; any other tool also has every string
+// of its input scanned.
 func Evaluate(in Input, o Options) string {
 	if o.Cwd == "" {
 		o.Cwd = in.Cwd
@@ -97,13 +92,6 @@ func Evaluate(in Input, o Options) string {
 	if in.ToolName == "" {
 		return reasonUnreadable("the tool call")
 	}
-	if r := evaluateTool(in, o); r != "" {
-		return r
-	}
-	return fieldScan{tool: in.ToolName, o: o, mention: true}.scan(in.extra)
-}
-
-func evaluateTool(in Input, o Options) string {
 	ti := in.ToolInput
 	switch {
 	case in.ToolName == "Monitor":
@@ -118,7 +106,7 @@ func evaluateTool(in Input, o Options) string {
 		if len(reasons) > 0 {
 			return commandReason(reasons)
 		}
-		return shellFields(in, o)
+		return ""
 	case isShellTool(in.ToolName):
 		cmds, _, ok := commandsOf(ti)
 		if !ok {
@@ -138,27 +126,15 @@ func evaluateTool(in Input, o Options) string {
 			}
 			return commandReason(rs.list)
 		}
-		return shellFields(in, o)
+		return ""
 	case strings.TrimPrefix(in.ToolName, "functions.") == "apply_patch":
 		// Codex's patch tool: the files it adds, updates, deletes or moves to.
 		// Its text is file content, so naming the binary is fine.
-		return fieldScan{tool: in.ToolName, o: o}.scan(ti)
+		return fieldScan{tool: in.ToolName, o: o, content: true}.scan(ti)
 	case fileTools[in.ToolName]:
 		return checkFileTool(in, o)
 	}
 	return checkOtherTool(in, o)
-}
-
-// shellFields scans a shell tool's other fields (not its command, cwd or prose).
-func shellFields(in Input, o Options) string {
-	skip := set("workdir", "cwd")
-	for _, k := range commandKeys {
-		skip[k] = true
-	}
-	for k := range shellProse {
-		skip[k] = true
-	}
-	return fieldScan{tool: in.ToolName, o: o, mention: true, skip: skip}.scan(in.ToolInput)
 }
 
 func checkFileTool(in Input, o Options) string {
@@ -190,12 +166,12 @@ func checkFileTool(in Input, o Options) string {
 
 // checkOtherTool checks a tool the guard doesn't know (MCP and the like): a
 // shell command gets the Bash checks, code the interpreter-code checks, a
-// Telegram tool asks unless it reads, and every other string is scanned. A
-// runner (exec, shell…) whose command the guard can't read is asked about.
+// Telegram tool asks unless it reads, and the rest is scanned by role
+// (fieldScan). A runner (exec, shell…) whose command the guard can't read,
+// and a raw-string input that names the binary or a TGAC_ variable, ask.
 func checkOtherTool(in Input, o Options) string {
 	ti := in.ToolInput
 	unreadable := reasonUnreadable("the command of this " + in.ToolName + " call")
-	analysed := map[string]bool{}
 	var rs reasonSet
 	cmds, present, ok := commandsOf(ti)
 	if present && !ok {
@@ -206,15 +182,16 @@ func checkOtherTool(in Input, o Options) string {
 			rs.add(r)
 		}
 	}
-	for _, k := range commandKeys {
-		_, has := ti[k]
-		analysed[k] = has && !in.wrapped // a raw string may not be a command at all
-	}
 	if in.wrapped {
+		// not JSON: maybe a command, maybe code, maybe neither
 		for _, r := range CheckCode(cmds[0], o) {
 			rs.add(r)
 		}
+		if invokeRe.MatchString(cmds[0]) || tgacVarRe.MatchString(cmds[0]) {
+			rs.add("raw input the guard can't parse names " + BinaryName + " or a TGAC_ variable")
+		}
 	}
+	hasCode := false
 	for _, k := range codeKeys {
 		v, has := ti[k]
 		if !has {
@@ -224,12 +201,12 @@ func checkOtherTool(in Input, o Options) string {
 		if !isStr {
 			return unreadable
 		}
-		analysed[k] = true
+		hasCode = true
 		for _, r := range CheckCode(code, o) {
 			rs.add(r)
 		}
 	}
-	if len(cmds) == 0 && !anyTrue(analysed) && isRunner(in.ToolName) {
+	if len(cmds) == 0 && !hasCode && isRunner(in.ToolName) {
 		return unreadable
 	}
 	rs.add(telegramTool(in))
@@ -237,16 +214,7 @@ func checkOtherTool(in Input, o Options) string {
 		return "Telegram account action: needs the account owner's explicit OK for this " + in.ToolName + " call (" +
 			strings.Join(rs.list, "; ") + ")"
 	}
-	return fieldScan{tool: in.ToolName, o: o, mention: !noMention[in.ToolName], analysed: analysed}.scan(ti)
-}
-
-func anyTrue(m map[string]bool) bool {
-	for _, v := range m {
-		if v {
-			return true
-		}
-	}
-	return false
+	return fieldScan{tool: in.ToolName, o: o}.scan(ti)
 }
 
 // mentionsAccount reports whether any part of a tool input names the binary or a data dir.
