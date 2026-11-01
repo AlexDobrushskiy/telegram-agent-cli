@@ -9,6 +9,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
@@ -38,6 +39,8 @@ type E2E interface {
 	React(ctx context.Context, p *Peer, msgID int, emoji string) error
 	PressCallback(ctx context.Context, p *Peer, msgID int, data []byte) (*CallbackAnswer, error)
 	SendWebAppData(ctx context.Context, p *Peer, buttonText, data string) error
+	// StopDraft taps stop on a live draft (the bot gets stopped_message_generation).
+	StopDraft(ctx context.Context, p *Peer, draftID int64) error
 	// WebAppURL opens a Mini App the way a client does and returns its URL (with signed initData).
 	WebAppURL(ctx context.Context, p *Peer, req WebAppRequest) (string, error)
 
@@ -141,6 +144,8 @@ type CallbackAnswer struct {
 type WebAppRequest struct {
 	Kind string // keyboard (reply keyboard web_app button) | inline | menu | main
 	URL  string // the button's or menu's URL (keyboard, inline, menu)
+	// Platform is the client platform reported to Telegram and the Mini App (default "android").
+	Platform string
 }
 
 // MenuButton is a bot's menu button that opens a Mini App.
@@ -395,11 +400,15 @@ func (s *Session) SendWebAppData(ctx context.Context, p *Peer, buttonText, data 
 	return err
 }
 
-// webAppPlatform is what the harness reports as its client platform.
-const webAppPlatform = "web"
+// DefaultWebAppPlatform is the client platform the harness reports.
+const DefaultWebAppPlatform = "android"
 
 func (s *Session) WebAppURL(ctx context.Context, p *Peer, r WebAppRequest) (string, error) {
 	bot := &tg.InputUser{UserID: p.RawID, AccessHash: p.AccessHash}
+	webAppPlatform := r.Platform
+	if webAppPlatform == "" {
+		webAppPlatform = DefaultWebAppPlatform
+	}
 	var res tg.WebViewResultURL
 	switch r.Kind {
 	case "keyboard":
@@ -645,7 +654,7 @@ func entitiesJSON(text string, ents []tg.MessageEntityClass) []Entity {
 	out := make([]Entity, 0, len(ents))
 	for _, ec := range ents {
 		off, n := ec.GetOffset(), ec.GetLength()
-		e := Entity{Type: strings.TrimPrefix(strings.ToLower(ec.TypeName()), "messageentity"), Offset: off, Length: n}
+		e := Entity{Type: entityType(ec.TypeName()), Offset: off, Length: n}
 		if off >= 0 && n >= 0 && off+n <= len(u) {
 			e.Text = string(utf16.Decode(u[off : off+n]))
 		}
@@ -660,4 +669,81 @@ func entitiesJSON(text string, ents []tg.MessageEntityClass) []Entity {
 		out = append(out, e)
 	}
 	return out
+}
+
+// entityRenames maps MTProto entity names to the Bot API's where they differ.
+var entityRenames = map[string]string{
+	"text_url": "text_link", "mention_name": "text_mention", "strike": "strikethrough",
+	"phone": "phone_number", "blockquote": "blockquote",
+}
+
+// entityType turns "messageEntityBotCommand" into the Bot API name "bot_command".
+func entityType(tl string) string {
+	name := strings.TrimPrefix(tl, "messageEntity")
+	var b strings.Builder
+	for i, r := range name {
+		if r >= 'A' && r <= 'Z' {
+			if i > 0 {
+				b.WriteByte('_')
+			}
+			r += 'a' - 'A'
+		}
+		b.WriteRune(r)
+	}
+	if n, ok := entityRenames[b.String()]; ok {
+		return n
+	}
+	return b.String()
+}
+
+// sendMessageStopDraftActionTypeID is sendMessageStopDraftAction#fbf902b0
+// random_id:long (newer than gotd's layer): what a client sends when the user
+// taps stop on a live draft.
+const sendMessageStopDraftActionTypeID = 0xfbf902b0
+
+// StopDraftRequest is messages.setTyping with sendMessageStopDraftAction,
+// encoded by hand because gotd's schema predates the action.
+type StopDraftRequest struct {
+	Peer     *tg.InputPeerUser
+	RandomID int64
+}
+
+// TypeName is the method name the guard checks.
+func (r *StopDraftRequest) TypeName() string { return "messages.setTyping" }
+
+// TargetUserIDs names the user the request addresses (for the guard's bot grant).
+func (r *StopDraftRequest) TargetUserIDs() ([]int64, bool) {
+	if r.Peer == nil {
+		return nil, false
+	}
+	return []int64{r.Peer.UserID}, true
+}
+
+func (r *StopDraftRequest) Encode(b *bin.Buffer) error {
+	if r.Peer == nil {
+		return fmt.Errorf("stop draft: no peer")
+	}
+	b.PutID(tg.MessagesSetTypingRequestTypeID)
+	b.PutInt(0) // flags: no top_msg_id
+	if err := r.Peer.Encode(b); err != nil {
+		return err
+	}
+	b.PutID(sendMessageStopDraftActionTypeID)
+	b.PutLong(r.RandomID)
+	return nil
+}
+
+func (r *StopDraftRequest) Decode(*bin.Buffer) error {
+	return fmt.Errorf("stop draft: decode not supported")
+}
+
+// StopDraft taps "stop" on the bot's live draft draftID.
+func (s *Session) StopDraft(ctx context.Context, p *Peer, draftID int64) error {
+	if p.Kind != KindUser {
+		return output.Usage("%s is not a user", p.Name)
+	}
+	var ok tg.BoolBox
+	return s.api.Invoker().Invoke(ctx, &StopDraftRequest{
+		Peer: &tg.InputPeerUser{UserID: p.RawID, AccessHash: p.AccessHash}, RandomID: draftID,
+	}, &ok)
 }

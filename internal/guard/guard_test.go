@@ -415,6 +415,8 @@ func TestAllowBot(t *testing.T) {
 		&tg.MessagesRequestMainWebViewRequest{Peer: bot, Bot: botUser, Platform: "web"},
 		&tg.UploadSaveFilePartRequest{FileID: 1},
 		&tg.UploadSaveBigFilePartRequest{FileID: 1},
+		&tg.MessagesSetTypingRequest{Peer: bot, Action: &tg.SendMessageTypingAction{}},
+		&targeted{ids: []int64{botID}},
 	}
 	for _, req := range pass {
 		if err := inv.Invoke(ctx, req, nil); err != nil {
@@ -442,7 +444,10 @@ func TestAllowBot(t *testing.T) {
 		&tg.MessagesForwardMessagesRequest{FromPeer: bot, ToPeer: bot},
 		&tg.MessagesDeleteMessagesRequest{ID: []int{1}},
 		&tg.MessagesReadHistoryRequest{Peer: bot},
-		&tg.MessagesSetTypingRequest{Peer: bot, Action: &tg.SendMessageTypingAction{}},
+		&tg.MessagesSetTypingRequest{Peer: other, Action: &tg.SendMessageTypingAction{}},
+		&targeted{ids: []int64{botID, 43}},
+		&targeted{ids: []int64{43}},
+		&targeted{},
 		&tg.MessagesEditMessageRequest{Peer: bot, ID: 1},
 		&tg.ContactsBlockRequest{ID: bot},
 		&tg.AuthAcceptLoginTokenRequest{},
@@ -468,7 +473,7 @@ func TestBotMethodsListed(t *testing.T) {
 	want := []string{
 		"messages.getBotCallbackAnswer", "messages.requestMainWebView", "messages.requestSimpleWebView",
 		"messages.requestWebView", "messages.sendMedia", "messages.sendMessage", "messages.sendReaction",
-		"messages.sendWebViewData", "upload.saveBigFilePart", "upload.saveFilePart",
+		"messages.sendWebViewData", "messages.setTyping", "upload.saveBigFilePart", "upload.saveFilePart",
 	}
 	if got := BotMethods(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("BotMethods = %v", got)
@@ -484,3 +489,10 @@ func TestBotMethodsListed(t *testing.T) {
 		}
 	}
 }
+
+// targeted is a hand-encoded request (a constructor newer than gotd) that names its users.
+type targeted struct{ ids []int64 }
+
+func (t *targeted) TypeName() string               { return "messages.setTyping" }
+func (t *targeted) TargetUserIDs() ([]int64, bool) { return t.ids, len(t.ids) > 0 }
+func (t *targeted) Encode(*bin.Buffer) error       { return nil }

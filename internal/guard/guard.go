@@ -239,6 +239,7 @@ var botMethods = map[string]bool{
 	"messages.requestSimpleWebView": true,
 	"messages.requestWebView":       true,
 	"messages.requestMainWebView":   true,
+	"messages.setTyping":            true, // typing and "stop" on a live draft
 }
 
 // uploadMethods carry file parts for a send; they name no peer and are private
@@ -305,6 +306,11 @@ func userIDs(req any) (ids []int64, ok bool) {
 		ok = peer(r.Peer) && user(r.Bot)
 	case *tg.MessagesRequestMainWebViewRequest:
 		ok = peer(r.Peer) && user(r.Bot)
+	case *tg.MessagesSetTypingRequest:
+		ok = peer(r.Peer)
+	case interface{ TargetUserIDs() ([]int64, bool) }:
+		// hand-encoded requests for constructors newer than gotd's schema
+		ids, ok = r.TargetUserIDs()
 	}
 	return ids, ok
 }

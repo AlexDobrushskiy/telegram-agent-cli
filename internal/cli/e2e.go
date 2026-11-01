@@ -43,6 +43,7 @@ func init() {
 	register("e2e", (*App).e2ePressCmd)
 	register("e2e", (*App).e2eWebAppDataCmd)
 	register("e2e", (*App).e2eWebAppURLCmd)
+	register("e2e", (*App).e2eStopCmd)
 	register("e2e", func(*App) *cobra.Command {
 		return group("read", "Read the bot chat: messages, reply keyboard, pinned message")
 	})
@@ -554,9 +555,9 @@ func (a *App) e2eWebAppDataCmd() *cobra.Command {
 
 func (a *App) e2eWebAppURLCmd() *cobra.Command {
 	var (
-		chat, button string
-		msg          int
-		menu, main   bool
+		chat, button, platform string
+		msg                    int
+		menu, main             bool
 	)
 	c := &cobra.Command{
 		Use:   "webapp-url",
@@ -582,6 +583,7 @@ func (a *App) e2eWebAppURLCmd() *cobra.Command {
 				if err != nil {
 					return nil, err
 				}
+				req.Platform = platform
 				u, err := b.t.WebAppURL(b.write(ctx), b.bot, req)
 				if err != nil {
 					return nil, err
@@ -595,6 +597,7 @@ func (a *App) e2eWebAppURLCmd() *cobra.Command {
 	c.Flags().IntVar(&msg, "msg", 0, "message with an inline web_app button")
 	c.Flags().BoolVar(&menu, "menu", false, "the bot's menu button")
 	c.Flags().BoolVar(&main, "main", false, "the bot's main Mini App")
+	c.Flags().StringVar(&platform, "platform", tgclient.DefaultWebAppPlatform, "client platform to report (android, ios, tdesktop, web…)")
 	return c
 }
 
@@ -640,6 +643,45 @@ func (c *e2eConn) webAppRequest(ctx context.Context, button string, msg int, men
 		return tgclient.WebAppRequest{}, "", output.Usage("button %q is a %s button, not a web_app button", btn.Text, btn.Type)
 	}
 	return tgclient.WebAppRequest{Kind: "keyboard", URL: btn.URL}, btn.Text, nil
+}
+
+func (a *App) e2eStopCmd() *cobra.Command {
+	var (
+		chat    string
+		draftID int64
+		w       waitFlags
+	)
+	c := &cobra.Command{
+		Use:   "stop",
+		Short: "Tap stop on the bot's live draft --draft ID (the bot gets stopped_message_generation)",
+		Long: "Does what the stop button on a streaming (sendMessageDraft) reply does: sends\n" +
+			"messages.setTyping with sendMessageStopDraftAction for that draft. The draft id is the draft_id\n" +
+			"from 'e2e wait --for draft'. Works only while the bot sent the draft with can_stop.",
+		Args: noArgs,
+		RunE: func(c *cobra.Command, _ []string) error {
+			if draftID == 0 {
+				return output.Usage("--draft is required (the draft_id from wait --for draft)")
+			}
+			if err := w.validate(); err != nil {
+				return err
+			}
+			return a.withBot(c.Context(), chat, func(ctx context.Context, b *e2eConn) (any, error) {
+				since, err := e2e.NewestID(ctx, b.t, b.bot)
+				if err != nil {
+					return nil, err
+				}
+				if err := b.t.StopDraft(b.write(ctx), b.bot, draftID); err != nil {
+					return nil, err
+				}
+				out := map[string]any{"chat": b.bot.Ref(), "stopped": draftID}
+				return b.afterWrite(ctx, &w, out, since, 0)
+			})
+		},
+	}
+	chatFlag(c, &chat)
+	c.Flags().Int64Var(&draftID, "draft", 0, "draft_id of the live draft")
+	w.add(c)
+	return c
 }
 
 func (a *App) e2eReadMessagesCmd() *cobra.Command {

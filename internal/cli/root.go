@@ -180,7 +180,7 @@ var readCommands = map[string]bool{
 	// sends to that bot alone. e2e allow/disallow change the config: writes.
 	"e2e send text": true, "e2e send photo": true, "e2e send voice": true, "e2e send file": true,
 	"e2e send location": true, "e2e react": true, "e2e press": true, "e2e web-app-data": true,
-	"e2e webapp-url": true, "e2e read messages": true, "e2e read keyboard": true, "e2e read pinned": true,
+	"e2e webapp-url": true, "e2e stop": true, "e2e read messages": true, "e2e read keyboard": true, "e2e read pinned": true,
 	"e2e wait": true, "e2e status": true,
 }
 

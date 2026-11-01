@@ -32,7 +32,7 @@ var readAllow = map[string][]string{
 	"hook":     {"claude-pretooluse", "codex-pretooluse"},
 	// e2e writes are their own gate: the binary sends only to bots already in
 	// e2e.allowed_chats. allow/disallow change that list, so they are writes.
-	"e2e":     {"send", "react", "press", "web-app-data", "webapp-url", "read", "wait", "status"},
+	"e2e":     {"send", "react", "press", "web-app-data", "webapp-url", "stop", "read", "wait", "status"},
 	"me":      nil,
 	"doctor":  nil,
 	"version": nil,

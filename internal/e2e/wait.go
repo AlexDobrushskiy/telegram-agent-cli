@@ -98,14 +98,15 @@ func fingerprint(v any) string {
 	return string(b)
 }
 
-// editState is what an edit changes.
+// editState is what an edit changes. edit_date is left out: Telegram also bumps
+// it when a reaction changes.
 func editState(m tgclient.BotMessage) any {
 	return struct {
-		Edited, Text string
-		Entities     []tgclient.Entity
-		Inline       [][]tgclient.Button
-		Media        *tgclient.Media
-	}{m.Edited, m.Text, m.Entities, m.Inline, m.Media}
+		Text     string              `json:"text"`
+		Entities []tgclient.Entity   `json:"entities,omitempty"`
+		Inline   [][]tgclient.Button `json:"inline_keyboard,omitempty"`
+		Media    *tgclient.Media     `json:"media,omitempty"`
+	}{m.Text, m.Entities, m.Inline, m.Media}
 }
 
 func reactionState(m tgclient.BotMessage) any { return m.Reactions }

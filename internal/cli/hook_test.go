@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/AlexDobrushskiy/telegram-agent-cli/internal/config"
+	"github.com/AlexDobrushskiy/telegram-agent-cli/internal/hook"
 )
 
 func TestHookPreToolUse(t *testing.T) {
@@ -104,4 +105,24 @@ func TestHookInstallCommand(t *testing.T) {
 	bad := filepath.Join(dir, "bad.json")
 	_ = os.WriteFile(bad, []byte("{"), 0o600)
 	h.fail(2, "usage", "hook", "uninstall", "--settings", bad)
+}
+
+// TestHookAgreesWithBinary: the guard hook passes every command the binary
+// runs as a read (including the e2e and watch commands that are their own gate)
+// without a prompt, and asks before every write. A command added to one list
+// and not the other fails here.
+func TestHookAgreesWithBinary(t *testing.T) {
+	h := newHarness(t)
+	leaves := map[string]bool{}
+	leafPaths(h.app.Root(), "", leaves)
+	o := hook.Options{DataDirs: []string{"/nonexistent/tgac"}, UserHome: "/nonexistent", Cwd: "/tmp"}
+	for path := range leaves {
+		r := hook.CheckBash("telegram-agent-cli "+path, o)
+		switch {
+		case readCommands[path] && len(r) > 0:
+			t.Errorf("read %q asks in the hook: %v", path, r)
+		case !readCommands[path] && !dryRunReads[path] && len(r) == 0:
+			t.Errorf("write %q passes the hook without a prompt", path)
+		}
+	}
 }
