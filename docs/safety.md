@@ -2,7 +2,7 @@
 
 How telegram-agent-cli keeps an agent from acting on your account, and where that stops.
 
-Four layers, each independent:
+Five layers, each independent:
 
 1. **MTProto middleware (in the binary).** Every request is checked against an exact allowlist of
    read methods (pinned by a test that walks every request type in gotd, so an upgrade cannot widen
@@ -82,6 +82,8 @@ Four layers, each independent:
    show the permission prompt in every mode, including `bypassPermissions`; in headless `claude -p`
    runs, where nobody can answer, the call is denied.
 4. **Watchers** have their own gate (registry, scopes, rate limits, pause files); see [watchers.md](watchers.md).
+5. **The e2e harness** has its own gate too (details [below](#e2e-harness)): it writes only to bots
+   the owner put in `e2e.allowed_chats`.
 
 **Limits.** The hook is a second check, not a sandbox:
 
@@ -101,6 +103,48 @@ Four layers, each independent:
 
 The session file is the real boundary: it is full access to the account. If you run agents you
 don't trust, run them as a different OS user or in a container that cannot read the data dir.
+
+## E2E harness
+
+`telegram-agent-cli e2e …` drives the owner's own bot as the owner, for end-to-end tests. It works
+in read-only mode, so unattended test agents can use it, and it is fenced like this:
+
+- **Allow-list.** Writes go only to entries of `e2e.allowed_chats` in `config.json`. A `--chat`
+  that matches no entry is refused (exit 8, `e2e_refused`) before connecting; a numeric id must
+  equal the resolved id of an entry. The target must be a bot user; a person, group or channel is
+  refused even if listed.
+- **Guard grant.** After that check the command runs its writes under a grant for that one bot.
+  The middleware then lets through only `messages.sendMessage`, `messages.sendMedia`,
+  `messages.sendReaction`, `messages.getBotCallbackAnswer`, `messages.sendWebViewData`,
+  `messages.requestSimpleWebView`, `messages.requestWebView`, `messages.requestMainWebView` and
+  `messages.setTyping` (typing, and "stop" on a live draft), each only when every peer it names is
+  that bot user, plus `upload.saveFilePart`/`upload.saveBigFilePart` for media. Wrapped requests,
+  always-denied methods and write-like arguments (paid sends) stay blocked.
+- **Hook.** `e2e` reads and writes pass without a prompt, since the binary enforces the list. The
+  hook still asks when an e2e write names a `--chat` that is not literally an allow-list entry
+  (`@name`, `name`, `t.me/name`, case-insensitive), and when it comes from an expansion.
+- **Changing the list is a write.** `e2e allow` and `e2e disallow` are off the read list: they need
+  `TGAC_READONLY=0` and the hook asks, so an agent cannot add a chat and then send there unprompted.
+  Editing `config.json` directly is a data-dir write, which asks too.
+
+## Codex
+
+`telegram-agent-cli hook codex-pretooluse` runs the same checks for Codex's `PreToolUse` hook.
+Codex has no "ask" (it treats one as a hook failure and runs the call), so the decision is `deny`
+with the reason; run a denied command yourself, outside the agent. For tools Claude Code doesn't
+have (`apply_patch`, MCP calls) it denies input that names a data dir, a Claude settings file or a
+Codex hook config. Those configs (`hooks.json` and `config.toml` in any `.codex` dir and in
+`$CODEX_HOME`) are protected like Claude Code settings. Add it to `~/.codex/hooks.json`, then
+approve it with `/hooks`:
+
+```json
+{"hooks": {"PreToolUse": [{"matcher": ".*", "hooks": [
+  {"type": "command", "command": "/absolute/path/telegram-agent-cli hook codex-pretooluse", "timeout": 10}
+]}]}}
+```
+
+Set `TGAC_READONLY=1` in Codex's shell environment as well (`[shell_environment_policy]` in
+`config.toml`). `hook install` covers Claude Code only.
 
 ## Claude Code hook details
 

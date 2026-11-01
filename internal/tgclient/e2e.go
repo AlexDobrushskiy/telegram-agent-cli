@@ -109,8 +109,19 @@ type Button struct {
 	raw []byte
 }
 
-// CallbackData returns the raw callback bytes.
-func (b Button) CallbackData() []byte { return b.raw }
+// CallbackData returns the raw callback bytes (from Data/DataBase64 when the
+// button was not converted from Telegram's).
+func (b Button) CallbackData() []byte {
+	if b.raw != nil {
+		return b.raw
+	}
+	if b.DataBase64 != "" {
+		if d, err := base64.StdEncoding.DecodeString(b.DataBase64); err == nil {
+			return d
+		}
+	}
+	return []byte(b.Data)
+}
 
 // ReplyMarkup is a non-inline markup: a reply keyboard, its removal, or force-reply.
 type ReplyMarkup struct {

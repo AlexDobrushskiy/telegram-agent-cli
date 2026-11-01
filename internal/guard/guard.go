@@ -259,6 +259,12 @@ func AllowBot(ctx context.Context, botID int64) context.Context {
 	return context.WithValue(ctx, botGrantKey{}, botID)
 }
 
+// GrantedBot returns the bot id an AllowBot grant on ctx names (0 = none).
+func GrantedBot(ctx context.Context) int64 {
+	id, _ := ctx.Value(botGrantKey{}).(int64)
+	return id
+}
+
 // BotMethods lists the methods an AllowBot grant covers (sorted), for docs and tests.
 func BotMethods() []string {
 	var out []string
