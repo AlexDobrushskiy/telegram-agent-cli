@@ -75,6 +75,12 @@ Watchers let an agent reply on its own, within rules you register yourself: whic
 limits, a dry-run mode and a pause switch. Your agent runs the loop and the CLI checks each reply.
 See [docs/watchers.md](docs/watchers.md).
 
+## E2E testing your bots
+
+`telegram-agent-cli e2e …` drives a bot you own as you (send, react, press buttons, read keyboards,
+wait for replies), writing only to bots you allow-list. See
+[docs/reference.md](docs/reference.md#e2e-harness-your-own-bots).
+
 ## Development
 
 `make build`, `make test`, `make lint`. Re-record the demo with `vhs demo/demo.tape`.

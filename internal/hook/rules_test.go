@@ -22,6 +22,7 @@ var testFiles = map[string]string{
 	"/work/scripts/ok.sh":   "#!/bin/sh\ntelegram-agent-cli me\n",
 	"/work/scripts/bad.sh":  "#!/bin/sh\ntelegram-agent-cli send text --chat 1 --message hi\n",
 	"/work/scripts/bad":     "#!/usr/bin/env bash\nset -e\ntelegram-agent-cli auth logout\n",
+	"/work/scripts/bad.py":  "import subprocess\nsubprocess.run(['telegram-agent-cli', 'send', 'text', '--chat', '1'])\n",
 	"/work/scripts/read.py": "import subprocess\nsubprocess.run(['telegram-agent-cli', 'me'])\n",
 	"/work/scripts/raw.py":  "from telethon.sync import TelegramClient\nTelegramClient('x.session', 1, 'h')\n",
 	"/work/scripts/home.py": "import os\nprint(os.path.expanduser('~/.config/telegram-agent-cli/session.json'))\n",
@@ -403,14 +404,7 @@ func TestRun(t *testing.T) {
 		`{"tool_name":"Monitor","tool_input":{"command":"tail -f app.log"}}`,
 		`{"tool_name":"Monitor","tool_input":{"ws":"wss://example.com"}}`,
 		`{"tool_name":"Bash","tool_input":{"command":"telegram-agent-cli chats list"}}`,
-		`{"tool_name":"Bash","tool_input":{"command":42}}`,
-		`{"tool_name":"Bash","tool_input":null}`,
-		`{"tool_name":"Bash"}`,
 		`{"tool_name":"WebFetch","tool_input":{"url":"https://example.com"}}`,
-		`{"tool_name":"Read","tool_input":{"file_path":["x"]}}`,
-		`not json`,
-		``,
-		`[]`,
 		`{"tool_name":"Bash","tool_input":{"command":"` + strings.Repeat("$(", 5000) + `"}}`,
 	} {
 		if out := run(t, p); out != "" {
@@ -472,5 +466,59 @@ func TestReadScriptOnlyRegularFiles(t *testing.T) {
 	}
 	if _, err := readScript("/dev/zero"); err == nil {
 		t.Error("readScript opened a device")
+	}
+}
+
+// A command ssh runs names files on the remote host: the guard must not read or
+// resolve them locally (on macOS /home is an automount, ~0.2 s per lookup, which
+// pushed long ssh commands past the deadline into an ask).
+func TestSSHRemotePathsStayRemote(t *testing.T) {
+	var reads []string
+	o := testOptions()
+	o.ReadFile = func(p string) ([]byte, error) {
+		reads = append(reads, p)
+		return nil, fs.ErrNotExist
+	}
+	for _, cmd := range []string{
+		"ssh server 'cd /home/alex/immich && bash ./upgrade.sh && cat notes.txt | sh'",
+		"ssh server bash /home/alex/x.sh",
+		"ssh server <<'EOF'\nsource /home/alex/.env\nEOF",
+	} {
+		reads = nil
+		if r := CheckBash(cmd, o); len(r) != 0 {
+			t.Errorf("%q: unexpected ask %v", cmd, r)
+		}
+		if len(reads) != 0 {
+			t.Errorf("%q: read local files %v for a remote command", cmd, reads)
+		}
+	}
+	// the same script run locally is still read
+	reads = nil
+	CheckBash("bash /home/alex/x.sh", o)
+	if len(reads) == 0 {
+		t.Error("local script not read")
+	}
+
+	// a local symlink into the data dir is followed locally, not for a remote path
+	tmp := t.TempDir()
+	data := filepath.Join(tmp, "data")
+	if err := os.Mkdir(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(tmp, "link")
+	if err := os.Symlink(data, link); err != nil {
+		t.Fatal(err)
+	}
+	so := Options{DataDirs: []string{data}, UserHome: tmp}
+	p := filepath.Join(link, "session.json")
+	if r := CheckBash("cat "+p, so); len(r) == 0 {
+		t.Error("local read through a symlink not caught")
+	}
+	if r := CheckBash("ssh box cat "+p, so); len(r) != 0 {
+		t.Errorf("remote path resolved through a local symlink: %v", r)
+	}
+	// the data dir named directly stays protected on the remote host too
+	if r := CheckBash("ssh box cat ~/.config/telegram-agent-cli/session.json", testOptions()); len(r) == 0 {
+		t.Error("remote data dir path not caught")
 	}
 }

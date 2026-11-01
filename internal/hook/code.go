@@ -96,8 +96,11 @@ var (
 
 // code analyses interpreter code.
 func (s *scanner) code(text string, c ctx) {
-	if writesSettings(text) {
-		s.reasons.add("runs code that touches Claude Code settings")
+	if writesSettings(text, s.o) {
+		s.reasons.add("runs code that touches Claude Code settings or a Codex hook config")
+	}
+	if opaqueCodeRe.MatchString(text) {
+		s.opaque(c, "runs code it builds or decodes at run time (the guard can't see it)", false)
 	}
 	if c.depth > maxDepth || !mentionRe.MatchString(text) {
 		return
@@ -165,12 +168,12 @@ func (s *scanner) argvList(text string, lits []lit, i int) {
 		}
 		switch rest[0] {
 		case ']', ')', '}':
-			s.reasons.add(checkInvocation(args))
+			s.reasons.add(checkInvocation(args, s.o))
 			return
 		case ',':
 			rest = strings.TrimLeft(rest[1:], " \t\r\n\\")
 			if rest != "" && strings.IndexByte("])}", rest[0]) >= 0 {
-				s.reasons.add(checkInvocation(args))
+				s.reasons.add(checkInvocation(args, s.o))
 				return
 			}
 			if k >= len(lits) || lits[k].start != len(text)-len(rest) {
@@ -215,6 +218,8 @@ func (s *scanner) interpreter(name string, args []token, cmd *command, c ctx) {
 		sawCode = true
 		if len(t.subs) > 0 {
 			s.hidden("runs interpreter code built at run time", s.subsDecode(t.subs))
+		} else if t.dynamic {
+			s.opaque(c, "runs interpreter code built at run time", false)
 		}
 		s.code(t.text, c)
 	}
@@ -241,6 +246,7 @@ func (s *scanner) interpreter(name string, args []token, cmd *command, c ctx) {
 		case t == "run" && (name == "deno" || name == "bun"):
 			continue
 		case t == "-":
+			s.terminalStdin(name, nil, cmd, nil)
 			s.stdinCode(cmd, c, false) // code on stdin, the rest is argv
 			return
 		case awk && t == "-f":
@@ -281,31 +287,88 @@ func (s *scanner) interpreter(name string, args []token, cmd *command, c ctx) {
 		return
 	}
 	if !sawCode && !sawScript {
+		s.terminalStdin(name, args, cmd, nil)
 		s.stdinCode(cmd, c, false)
 	}
 }
 
 // stdinCode analyses what a shell (asShell) or interpreter reads on stdin.
 func (s *scanner) stdinCode(cmd *command, c ctx, asShell bool) {
-	if cmd == nil {
-		return
-	}
-	run := func(text string) {
+	s.stdinText(cmd, c, asShell)
+	s.stdinFiles(cmd, c, asShell)
+}
+
+func (s *scanner) stdinRun(c ctx, asShell bool) func(string) {
+	return func(text string) {
 		if asShell {
 			s.str(text, c)
 		} else {
 			s.code(text, c)
 		}
 	}
+}
+
+// stdinText analyses heredocs and here-strings fed to stdin.
+func (s *scanner) stdinText(cmd *command, c ctx, asShell bool) {
+	if cmd == nil {
+		return
+	}
+	run := s.stdinRun(c, asShell)
 	for _, h := range cmd.heredocs {
 		run(h.body)
 	}
 	for _, hs := range cmd.herestrings {
 		run(hs.text)
 	}
+}
+
+// stdinFiles analyses a pipe or redirected file fed to stdin.
+func (s *scanner) stdinFiles(cmd *command, c ctx, asShell bool) {
+	if cmd == nil {
+		return
+	}
+	run := s.stdinRun(c, asShell)
 	if len(cmd.heredocs) == 0 && len(cmd.herestrings) == 0 && cmd.pipeIn {
 		s.pipedIn(cmd, c, run)
 	}
+	mode := modeText
+	if asShell {
+		mode = modeShell
+	}
+	for _, r := range cmd.inRedirs {
+		switch {
+		case r.text == "-" || allDigits(r.text):
+			// <&3, <&-: a file descriptor
+		case r.dynamic || r.glob:
+			s.hidden(reasonUnseen+" ("+r.text+")", s.subsDecode(r.subs))
+		default:
+			s.file(r.text, mode, c)
+		}
+	}
+}
+
+const reasonTerminal = "starts a shell or interpreter that reads commands from the terminal; " +
+	"Codex types into it with write_stdin, which the hook never sees"
+
+// infoFlags make a shell, interpreter or ssh print something and exit.
+var infoFlags = set("--version", "-version", "--help", "-V", "-h")
+
+// versionV are the interpreters whose -v prints the version and exits.
+var versionV = set("node", "deno", "bun", "php", "perl")
+
+// terminalStdin asks about a shell, REPL or remote shell reading the terminal,
+// when Options.TerminalStdin says another tool can type into it unchecked.
+func (s *scanner) terminalStdin(name string, args []token, cmd *command, extra map[string]bool) {
+	if !s.o.TerminalStdin || cmd == nil || cmd.pipeIn ||
+		len(cmd.heredocs)+len(cmd.herestrings)+len(cmd.inRedirs) > 0 {
+		return
+	}
+	for _, a := range args {
+		if infoFlags[a.text] || extra[a.text] || a.text == "-v" && versionV[name] {
+			return
+		}
+	}
+	s.reasons.add(reasonTerminal)
 }
 
 func errorsIsNotExist(err error) bool { return errors.Is(err, fs.ErrNotExist) }

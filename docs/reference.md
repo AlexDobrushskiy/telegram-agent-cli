@@ -112,10 +112,72 @@ this session). In read-only mode they fail with exit 3 (`"code":"readonly"`) bef
 `watch reply --watcher NAME --chat ID --text TEXT [--reply-to N] [--dry-run]` · `watch list` ·
 `watch check --watcher NAME`. See [watchers.md](watchers.md).
 
+### E2E harness (your own bots)
+
+Drive a bot you own as yourself, for end-to-end tests. Writes go only to bots listed in `config.json`
+`e2e.allowed_chats` and work in read-only mode (see [safety.md](safety.md#e2e-harness)). `--chat`
+takes an allow-list entry and defaults to the only one. Anything else is refused with exit 8 before
+anything is sent. Message ids are the ones your account sees.
+
+| Command | |
+|---|---|
+| `e2e allow @BOT` · `e2e disallow ENTRY` | Add/remove an allow-list entry (writes: need `TGAC_READONLY=0`; `allow` checks it is a bot) |
+| `e2e status` | Allow-list entries and what each resolves to |
+| `e2e send text [TEXT] [--message TEXT] [--reply-to N]` | Text message |
+| `e2e send photo --path F [--caption C] [--reply-to N]` | Photo |
+| `e2e send voice --path F.ogg [--duration S] [--reply-to N]` | Voice note (Ogg/Opus; arrives as `voice`, duration read from the file) |
+| `e2e send file --path F [--caption C] [--reply-to N]` | Document |
+| `e2e send location --lat X --long Y [--reply-to N]` | Location |
+| `e2e react --msg N (--emoji E \| --remove)` | Set or remove your reaction (`❤️` is sent as `❤`) |
+| `e2e press --msg N --button B` | Tap an inline callback button; returns the bot's answer (`answered:false` if it never answered) |
+| `e2e press --keyboard --button B` | Tap a reply-keyboard button: sends its exact text |
+| `e2e web-app-data --button B --data D` | What `Telegram.WebApp.sendData` does from the keyboard `web_app` button B: the bot gets `web_app_data` |
+| `e2e webapp-url (--button B \| --msg N --button B \| --menu \| --main) [--platform android]` | Open a Mini App like a client; prints its URL. Inline and menu entries carry signed initData (`#tgWebAppData=…`); keyboard buttons get none (Telegram's rule). The URL is a credential |
+| `e2e stop --draft ID` | Tap stop on a live draft (`sendMessageDraft` with `can_stop`); the bot gets `stopped_message_generation` |
+| `e2e read messages [--since N] [--limit 20] [--from bot\|me\|any]` | Messages, oldest first |
+| `e2e read keyboard` | The reply keyboard in effect: buttons, `placeholder`, `persistent`, the message that set it (`null` = none) |
+| `e2e read pinned` | The pinned message (`null` = none) |
+| `e2e wait --for KIND [--since N] [--msg N] [--all] [--timeout 30] [--interval 1]` | Poll until KIND happens; exit 9 if it doesn't |
+
+`--button` is the button text, or its 0-based index counted row by row. Wait kinds: `reply` (a new
+bot message with id > `--since`, default the newest at start), `edit` (text, entities, buttons or
+media of a bot message change; `--msg` or the 20 newest, including bot messages that arrive during
+the wait), `reaction` (reactions change, either side), `pin` (another message is pinned, or the
+pinned one is edited; reactions don't count), `keyboard` (the reply keyboard in effect changes; it is
+looked up however far back it was set), `draft` (`--all` collects drafts until the final message).
+Write commands take `--wait KIND [--timeout] [--interval] [--all]` to act and wait in one call. The
+wait's starting state is taken before the write, so a bot that answers at once is still seen. A send
+(`send …`, `press --keyboard`) waits for `reaction` on the message it sent; `react` waits for the
+other side's reaction (your own doesn't count); `press --msg` watches the pressed message for `edit`
+and `reaction`. `--timeout` also bounds the polls (a long FLOOD_WAIT ends as exit 9).
+
+```sh
+TGAC_READONLY=0 telegram-agent-cli e2e allow @my_test_bot        # once, by the account owner
+telegram-agent-cli e2e send text "ping" --wait reply --timeout 20
+telegram-agent-cli e2e press --msg 4242 --button "Yes"
+telegram-agent-cli e2e wait --for reaction --msg 4243 --timeout 10
+```
+
+E2E messages (`BotMessage`): `id`, `date`, `from` (`bot`/`me`), `text`, and when present `edited`,
+`entities[{type,offset,length,text,url,user_id,language,custom_emoji_id}]` (Bot API type names,
+offsets in UTF-16), `reply_to`, `media`, `media_id` (the photo or document id), `service{type,button_text,data}`, `reactions[{emoji|custom_emoji_id|paid,count,mine,by}]`,
+`inline_keyboard[[button]]`, `reply_markup{type:keyboard|hide|force_reply,rows,persistent,resize,one_time,selective,placeholder}`,
+`album`. Buttons: `text`, `type`, and `data`/`data_base64`, `url`, `query`, `copy` by type. Drafts:
+`date`, `draft_id`, `text`, `can_stop`, `keep_on_stop`.
+
+Notes: in a private chat your account and the bot number messages separately, so the bot's ids
+(Bot API, its logs) differ from these. Telegram also bumps `edited` when a reaction changes. Reads
+never mark messages as read.
+
 ### Hook
 
-`hook claude-pretooluse` (the hook itself, reads stdin) · `hook install [--settings PATH] [--binary PATH] [--dry-run]` ·
+`hook claude-pretooluse` (the hook itself, reads stdin) · `hook codex-pretooluse` (the same for Codex: denies instead of asking) · `hook install [--settings PATH] [--binary PATH] [--dry-run]` ·
 `hook uninstall [--settings PATH] [--dry-run]`.
+
+Both hooks decide on every shell shape (`Bash`, Codex's `exec_command`/`cmd`, argv arrays, a
+`command`/`cmd`/`code` field of an MCP tool) and fail closed on a payload they can't read. The Codex
+hook also denies an interactive shell or REPL on the terminal, because Codex's `write_stdin` is not
+hooked. Details: [safety.md](safety.md#codex).
 
 ## JSON output
 
@@ -148,6 +210,8 @@ Failure:
 | 5 | `telegram`, `flood_wait` | Telegram RPC error or rate limit (`details.retry_after` seconds) |
 | 6 | `lock_busy` | another call held the account lock longer than `TGAC_LOCK_WAIT` |
 | 7 | `watcher_refused` | a watcher rule refused the reply (reason in the message) |
+| 8 | `e2e_refused` | an e2e command named a chat that is not an allow-listed bot |
+| 9 | `timeout` | an e2e wait ended without its event |
 
 `schema_version` changes only on breaking changes to these shapes.
 
@@ -176,6 +240,7 @@ Data dir: `$TGAC_HOME`, default `~/.config/telegram-agent-cli/` (mode 0700, file
 | `lang_code` | `en` | |
 | `watcher_session_env` | `TGAC_WATCHER_SESSION` | env var naming the calling agent session |
 | `global_per_hour` | `30` | watcher sends per hour across all watchers |
+| `e2e.allowed_chats` | | bots the e2e harness may write to (`@username` or id); set with `e2e allow` |
 
 Environment:
 

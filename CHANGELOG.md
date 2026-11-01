@@ -3,6 +3,34 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `e2e`: an end-to-end test harness for your own bots. Send text, photos, voice notes, files and
+  locations; reply, react, press inline and keyboard buttons; send Mini App data; open Mini App URLs
+  with signed initData; stop live drafts; read messages, the reply keyboard and the pinned message;
+  wait for replies, edits, reactions, pins, keyboards and drafts. Writes go only to bots in
+  `e2e.allowed_chats` (`e2e allow`), work in read-only mode through a per-bot guard grant, and need
+  no hook prompt; other targets exit 8, waits that time out exit 9.
+- `hook codex-pretooluse`: the guard for Codex (denies where Claude Code would ask); Codex hook
+  configs are protected like Claude Code settings. It checks every shell shape Codex sends and
+  denies interactive shells/REPLs on the terminal (Codex's `write_stdin` is not hooked).
+
+### Changed
+
+- The hooks fail closed: a payload they can't read, or a shell tool without a readable command,
+  gets a decision instead of passing. `exec_command`/`cmd`, argv arrays and MCP `command`/`cmd`/
+  `code` fields get the Bash or interpreter-code checks. `hook install` adds a third matcher,
+  `mcp__.*|PowerShell`; run it again to pick it up.
+- The hooks decide on every string a payload carries, the same way for Claude Code and Codex:
+  JSON-string `tool_input`, both `command` and `cmd`, nested and JSON-encoded fields by their role
+  (commands, code, terminal input, `TGAC_` settings, protected paths). Telegram tools ask unless
+  they read; runners without a readable command ask; input in an unknown envelope asks. Plain text
+  that mentions the binary, and call metadata, stay data. Opaque execution that names none of these
+  still passes (`docs/safety.md`, Limits).
+- A shell or interpreter reading a script through `<` (`bash < x.sh`) gets the script checked.
+
 ## [0.1.3] - 2026-10-29
 
 ### Added

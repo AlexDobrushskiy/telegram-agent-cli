@@ -393,3 +393,140 @@ func TestRiskyArguments(t *testing.T) {
 		}
 	}
 }
+
+func TestAllowBot(t *testing.T) {
+	const botID = 42
+	bot := &tg.InputPeerUser{UserID: botID, AccessHash: 7}
+	botUser := &tg.InputUser{UserID: botID, AccessHash: 7}
+	other := &tg.InputPeerUser{UserID: 43, AccessHash: 7}
+	otherUser := &tg.InputUser{UserID: 43, AccessHash: 7}
+	next := &countingInvoker{}
+	inv := Middleware(func() bool { return true }, false).Handle(next)
+	ctx := AllowBot(context.Background(), botID)
+
+	pass := []bin.Encoder{
+		&tg.MessagesSendMessageRequest{Peer: bot, Message: "x"},
+		&tg.MessagesSendMediaRequest{Peer: bot, Media: &tg.InputMediaGeoPoint{GeoPoint: &tg.InputGeoPoint{}}},
+		&tg.MessagesSendReactionRequest{Peer: bot, MsgID: 1},
+		&tg.MessagesGetBotCallbackAnswerRequest{Peer: bot, MsgID: 1},
+		&tg.MessagesSendWebViewDataRequest{Bot: botUser, ButtonText: "b", Data: "d"},
+		&tg.MessagesRequestSimpleWebViewRequest{Bot: botUser, Platform: "web"},
+		&tg.MessagesRequestWebViewRequest{Peer: bot, Bot: botUser, Platform: "web"},
+		&tg.MessagesRequestMainWebViewRequest{Peer: bot, Bot: botUser, Platform: "web"},
+		&tg.UploadSaveFilePartRequest{FileID: 1},
+		&tg.UploadSaveBigFilePartRequest{FileID: 1},
+		&tg.MessagesSetTypingRequest{Peer: bot, Action: &tg.SendMessageTypingAction{}},
+		&targeted{ids: []int64{botID}},
+	}
+	for _, req := range pass {
+		if err := inv.Invoke(ctx, req, nil); err != nil {
+			t.Errorf("%T to the bot blocked: %v", req, err)
+		}
+		// repeatable: a command may upload parts and then send
+		if err := inv.Invoke(ctx, req, nil); err != nil {
+			t.Errorf("%T second call blocked: %v", req, err)
+		}
+	}
+	block := []bin.Encoder{
+		&tg.MessagesSendMessageRequest{Peer: other, Message: "x"},
+		&tg.MessagesSendMessageRequest{Peer: &tg.InputPeerSelf{}, Message: "x"},
+		&tg.MessagesSendMessageRequest{Peer: &tg.InputPeerChat{ChatID: botID}, Message: "x"},
+		&tg.MessagesSendMessageRequest{Peer: &tg.InputPeerChannel{ChannelID: botID}, Message: "x"},
+		&tg.MessagesSendMessageRequest{Peer: &tg.InputPeerUserFromMessage{Peer: bot, UserID: botID}, Message: "x"},
+		&tg.MessagesSendMessageRequest{Peer: bot, Message: "x", AllowPaidStars: 5},
+		&tg.MessagesSendMediaRequest{Peer: other},
+		&tg.MessagesSendReactionRequest{Peer: other, MsgID: 1},
+		&tg.MessagesGetBotCallbackAnswerRequest{Peer: other, MsgID: 1},
+		&tg.MessagesSendWebViewDataRequest{Bot: otherUser},
+		&tg.MessagesRequestSimpleWebViewRequest{Bot: otherUser},
+		&tg.MessagesRequestWebViewRequest{Peer: other, Bot: botUser},
+		&tg.MessagesRequestWebViewRequest{Peer: bot, Bot: otherUser},
+		&tg.MessagesForwardMessagesRequest{FromPeer: bot, ToPeer: bot},
+		&tg.MessagesDeleteMessagesRequest{ID: []int{1}},
+		&tg.MessagesReadHistoryRequest{Peer: bot},
+		&tg.MessagesSetTypingRequest{Peer: other, Action: &tg.SendMessageTypingAction{}},
+		&targeted{ids: []int64{botID, 43}},
+		&targeted{ids: []int64{43}},
+		&targeted{},
+		&tg.MessagesEditMessageRequest{Peer: bot, ID: 1},
+		&tg.ContactsBlockRequest{ID: bot},
+		&tg.AuthAcceptLoginTokenRequest{},
+		&tg.InvokeWithLayerRequest{Query: &tg.MessagesSendMessageRequest{Peer: bot}},
+	}
+	for _, req := range block {
+		if err := inv.Invoke(ctx, req, nil); err == nil {
+			t.Errorf("%T passed with a bot grant", req)
+		}
+	}
+	if err := inv.Invoke(context.Background(), &tg.MessagesSendMessageRequest{Peer: bot}, nil); err == nil {
+		t.Error("send passed without a grant")
+	}
+	if err := inv.Invoke(AllowBot(context.Background(), 0), &tg.MessagesSendMessageRequest{Peer: &tg.InputPeerUser{}}, nil); err == nil {
+		t.Error("a zero bot id granted a send")
+	}
+	if next.calls != 2*len(pass) {
+		t.Fatalf("calls = %d, want %d", next.calls, 2*len(pass))
+	}
+}
+
+func TestBotMethodsListed(t *testing.T) {
+	want := []string{
+		"messages.getBotCallbackAnswer", "messages.requestMainWebView", "messages.requestSimpleWebView",
+		"messages.requestWebView", "messages.sendMedia", "messages.sendMessage", "messages.sendReaction",
+		"messages.sendWebViewData", "messages.setTyping", "upload.saveBigFilePart", "upload.saveFilePart",
+	}
+	if got := BotMethods(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("BotMethods = %v", got)
+	}
+	// Every listed name is a real gotd request, so a rename can't silently drop one.
+	names := map[string]bool{}
+	for _, ctor := range tg.TypesConstructorMap() {
+		names[MethodName(ctor())] = true
+	}
+	for _, m := range want {
+		if !names[m] {
+			t.Errorf("%s is not a gotd request", m)
+		}
+	}
+}
+
+// targeted is a hand-encoded request (a constructor newer than gotd) that names its users.
+type targeted struct{ ids []int64 }
+
+func (t *targeted) TypeName() string               { return "messages.setTyping" }
+func (t *targeted) TargetUserIDs() ([]int64, bool) { return t.ids, len(t.ids) > 0 }
+func (t *targeted) Encode(*bin.Buffer) error       { return nil }
+
+// A bot grant covers a plain send to the bot: not a reply that quotes another
+// chat, a send as someone else, or a quick-reply shortcut.
+func TestAllowBotPlainSendsOnly(t *testing.T) {
+	const botID = 42
+	bot := &tg.InputPeerUser{UserID: botID, AccessHash: 7}
+	other := &tg.InputPeerUser{UserID: 43, AccessHash: 7}
+	inv := Middleware(func() bool { return true }, false).Handle(&countingInvoker{})
+	ctx := AllowBot(context.Background(), botID)
+	pass := []bin.Encoder{
+		&tg.MessagesSendMessageRequest{Peer: bot, Message: "x", ReplyTo: &tg.InputReplyToMessage{ReplyToMsgID: 5}},
+		&tg.MessagesSendMediaRequest{Peer: bot, ReplyTo: &tg.InputReplyToMessage{ReplyToMsgID: 5}},
+		&tg.MessagesSendMessageRequest{Peer: bot, Message: "x", ReplyTo: &tg.InputReplyToMessage{ReplyToMsgID: 5, ReplyToPeerID: bot}},
+	}
+	for _, req := range pass {
+		if err := inv.Invoke(ctx, req, nil); err != nil {
+			t.Errorf("%+v blocked: %v", req, err)
+		}
+	}
+	block := []bin.Encoder{
+		&tg.MessagesSendMessageRequest{Peer: bot, Message: "x", ReplyTo: &tg.InputReplyToMessage{ReplyToMsgID: 5, ReplyToPeerID: other}},
+		&tg.MessagesSendMediaRequest{Peer: bot, ReplyTo: &tg.InputReplyToMessage{ReplyToMsgID: 5, ReplyToPeerID: &tg.InputPeerChannel{ChannelID: 9}}},
+		&tg.MessagesSendMessageRequest{Peer: bot, Message: "x", ReplyTo: &tg.InputReplyToMessage{ReplyToMsgID: 5, MonoforumPeerID: other}},
+		&tg.MessagesSendMessageRequest{Peer: bot, Message: "x", ReplyTo: &tg.InputReplyToStory{Peer: other, StoryID: 1}},
+		&tg.MessagesSendMessageRequest{Peer: bot, Message: "x", SendAs: other},
+		&tg.MessagesSendMediaRequest{Peer: bot, SendAs: other},
+		&tg.MessagesSendMessageRequest{Peer: bot, Message: "x", QuickReplyShortcut: &tg.InputQuickReplyShortcut{Shortcut: "s"}},
+	}
+	for _, req := range block {
+		if err := inv.Invoke(ctx, req, nil); err == nil {
+			t.Errorf("%+v passed with a bot grant", req)
+		}
+	}
+}

@@ -29,11 +29,14 @@ var readAllow = map[string][]string{
 	"media":    {"download"},
 	"auth":     {"status"},
 	"watch":    {"reply", "list", "check"}, // reply is its own gate: registry, scope, rate limits
-	"hook":     {"claude-pretooluse"},
-	"me":       nil,
-	"doctor":   nil,
-	"version":  nil,
-	"help":     nil,
+	"hook":     {"claude-pretooluse", "codex-pretooluse"},
+	// e2e writes are their own gate: the binary sends only to bots already in
+	// e2e.allowed_chats. allow/disallow change that list, so they are writes.
+	"e2e":     {"send", "react", "press", "web-app-data", "webapp-url", "stop", "read", "wait", "status"},
+	"me":      nil,
+	"doctor":  nil,
+	"version": nil,
+	"help":    nil,
 }
 
 // boolFlags never take a value; any other "--flag" without "=" may eat the next word.
@@ -69,7 +72,14 @@ type Options struct {
 	XDGConfigHome string
 	// ClaudeConfigDir is $CLAUDE_CONFIG_DIR; ~/.claude and every .claude dir are always protected.
 	ClaudeConfigDir string
-	Deadline        time.Duration // Run's time budget (DefaultDeadline if zero)
+	// E2EAllowed are the e2e.allowed_chats entries of the data dirs' config.json.
+	E2EAllowed []string
+	// CodexHome is $CODEX_HOME; hooks.json/config.toml there and in every .codex dir are protected.
+	CodexHome string
+	// TerminalStdin: a command's stdin may be a terminal that another tool types
+	// into unchecked (Codex's write_stdin), so a shell or REPL reading it is asked about.
+	TerminalStdin bool
+	Deadline      time.Duration // Run's time budget (DefaultDeadline if zero)
 }
 
 // DefaultOptions protects $TGAC_HOME (if set) and the default data dir.
@@ -86,8 +96,10 @@ func DefaultOptions() Options {
 		}
 	}
 	o.WatcherEnvs = WatcherEnvsFor(o.DataDirs)
+	o.E2EAllowed = E2EAllowedFor(o.DataDirs)
 	o.XDGConfigHome = os.Getenv("XDG_CONFIG_HOME")
 	o.ClaudeConfigDir = os.Getenv("CLAUDE_CONFIG_DIR")
+	o.CodexHome = os.Getenv("CODEX_HOME")
 	return o
 }
 
@@ -151,6 +163,16 @@ func CheckBash(cmd string, o Options) []string {
 	s := newScanner(o)
 	text := s.scanTop(cmd)
 	s.rawRules(text)
+	return s.reasons.list
+}
+
+// CheckCode returns why code a tool runs (a JavaScript REPL, a run-code tool)
+// needs the owner's OK, with the interpreter-code rules (nil = let it run).
+func CheckCode(code string, o Options) []string {
+	s := newScanner(o)
+	s.code(code, ctx{})
+	s.finish(code)
+	s.rawRules(code)
 	return s.reasons.list
 }
 
@@ -274,7 +296,7 @@ func resolvePath(p string, o Options) string {
 }
 
 // checkInvocation returns why a run of the binary with args is not a read.
-func checkInvocation(args []token) string {
+func checkInvocation(args []token, o Options) string {
 	var naive, cobra []token
 	help := false
 	for i := 0; i < len(args); i++ {
@@ -310,7 +332,64 @@ func checkInvocation(args []token) string {
 	if r := checkPath(naive); r != "" {
 		return r
 	}
-	return checkPath(cobra)
+	if r := checkPath(cobra); r != "" {
+		return r
+	}
+	return checkE2EChat(cobra, args, o)
+}
+
+// e2eWrites are the e2e subcommands that write to the chat.
+var e2eWrites = set("send", "react", "press", "web-app-data", "webapp-url", "stop")
+
+// checkE2EChat asks when an e2e write names a --chat that is not literally an
+// e2e.allowed_chats entry. Without --chat the binary uses the only allowed bot.
+// The binary refuses other chats itself; this keeps the prompt as a second check.
+func checkE2EChat(path, args []token, o Options) string {
+	if len(path) < 2 || path[0].text != "e2e" || !e2eWrites[path[1].text] {
+		return ""
+	}
+	for i := 0; i < len(args); i++ {
+		t := args[i].text
+		if t == "--" {
+			break
+		}
+		var v token
+		switch {
+		case t == "--chat" && i+1 < len(args):
+			v = args[i+1]
+			i++
+		case strings.HasPrefix(t, "--chat="):
+			v = args[i]
+			v.text = strings.TrimPrefix(t, "--chat=")
+		default:
+			continue
+		}
+		if v.dynamic || v.glob {
+			return BinaryName + " e2e --chat comes from an expansion"
+		}
+		if !e2eListed(o.E2EAllowed, v.text) {
+			return BinaryName + " e2e --chat " + v.text + " is not an e2e.allowed_chats entry"
+		}
+	}
+	return ""
+}
+
+// e2eListed reports whether chat is one of the entries, in the same textual
+// form (@name, name, t.me/name; case-insensitive) or the same id string.
+func e2eListed(entries []string, chat string) bool {
+	norm := func(s string) string {
+		s = strings.ToLower(strings.TrimSpace(s))
+		for _, p := range []string{"https://t.me/", "http://t.me/", "t.me/"} {
+			s = strings.TrimPrefix(s, p)
+		}
+		return strings.TrimPrefix(s, "@")
+	}
+	for _, e := range entries {
+		if norm(e) == norm(chat) && norm(chat) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func checkPath(p []token) string {

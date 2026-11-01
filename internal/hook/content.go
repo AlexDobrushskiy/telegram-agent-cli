@@ -24,9 +24,29 @@ var fileWriteRe = regexp.MustCompile(`open\([^)]*,\s*(?:mode\s*=\s*)?['"][rwax+b
 	`writeFile(?:Sync)?\(|os\.(?:replace|rename|remove|unlink)\(|shutil\.(?:copy|move)|\.unlink\(|File\.write|` +
 	`os\.WriteFile|fs\.(?:rm|unlink|rename)|sed\s+-i`)
 
-// writesSettings reports whether code names a settings file and writes a file.
-func writesSettings(code string) bool {
-	return settingsCodeRe.MatchString(code) && fileWriteRe.MatchString(code)
+// codexHookTail is the file part of a Codex hook config path in code.
+const codexHookTail = `['"]?\s*[/\\,]+\s*['"]?(?:hooks\.json|config\.toml)`
+
+// codexHookCodeRe names a hook config in a .codex dir, as a path or joined parts.
+var codexHookCodeRe = regexp.MustCompile(`(?i)\.codex` + codexHookTail)
+
+// namesCodexHook reports whether code names a Codex hook config, in a .codex
+// dir or in $CODEX_HOME.
+func namesCodexHook(code string, o Options) bool {
+	if codexHookCodeRe.MatchString(code) {
+		return true
+	}
+	if o.CodexHome == "" {
+		return false
+	}
+	home := regexp.QuoteMeta(strings.TrimRight(filepath.Clean(o.CodexHome), "/"))
+	return regexp.MustCompile(`(?i)` + home + codexHookTail).MatchString(code)
+}
+
+// writesSettings reports whether code names a Claude Code settings file or a
+// Codex hook config and writes a file.
+func writesSettings(code string, o Options) bool {
+	return (settingsCodeRe.MatchString(code) || namesCodexHook(code, o)) && fileWriteRe.MatchString(code)
 }
 
 var docExts = set(".md", ".markdown", ".mdx", ".txt", ".rst", ".adoc", ".org")
@@ -51,6 +71,9 @@ func settingsTarget(p string, o Options) bool {
 		b := strings.ToLower(filepath.Base(q))
 		dir := filepath.Dir(q)
 		if b == "managed-settings.json" || b == ".claude" {
+			return true
+		}
+		if codexHookFile(q, o) {
 			return true
 		}
 		isDir := func(d string) bool {
@@ -80,6 +103,20 @@ func settingsTarget(p string, o Options) bool {
 		}
 	}
 	return false
+}
+
+// codexHookFile reports whether p is a file Codex loads hooks from: hooks.json
+// or config.toml in a .codex dir or in $CODEX_HOME.
+func codexHookFile(p string, o Options) bool {
+	b := strings.ToLower(filepath.Base(p))
+	if b != "hooks.json" && b != "config.toml" {
+		return false
+	}
+	dir := filepath.Dir(p)
+	if strings.EqualFold(filepath.Base(dir), ".codex") {
+		return true
+	}
+	return o.CodexHome != "" && within(dir, o.CodexHome) && within(o.CodexHome, dir)
 }
 
 // projection is the part of a settings file the guard depends on, canonical.
@@ -229,8 +266,8 @@ func CheckContent(tool string, ti map[string]any, o Options) string {
 		if segmentRe.MatchString(t) {
 			s.reasons.add(reasonDataDir)
 		}
-		if writesSettings(t) {
-			s.reasons.add("writes code that touches Claude Code settings")
+		if writesSettings(t, o) {
+			s.reasons.add("writes code that touches Claude Code settings or a Codex hook config")
 		}
 	}
 	return strings.Join(s.reasons.list, "; ")

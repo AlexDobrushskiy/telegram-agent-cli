@@ -1,0 +1,14 @@
+{
+ "session_id": "01a19724-803c-77b3-9a1e-9d07bd13e2c7",
+ "turn_id": "01a19724-8116-7731-8f80-0a9b34d22934",
+ "transcript_path": "/xhome/u/.codex/sessions/2026/11/01/rollout-2026-11-01T12-45-14-01a19724-803c-77b3-9a1e-9d07bd13e2c7.jsonl",
+ "cwd": "/work",
+ "hook_event_name": "PreToolUse",
+ "model": "gpt-6-astra",
+ "permission_mode": "bypassPermissions",
+ "tool_name": "apply_patch",
+ "tool_input": {
+  "command": "*** Begin Patch\n*** Add File: tui.txt\n+x\n*** End Patch"
+ },
+ "tool_use_id": "exec-a30353a8-7249-4df8-b487-8ee7df56f920"
+}

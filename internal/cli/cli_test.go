@@ -479,6 +479,8 @@ var writeCommands = map[string][]string{
 	"hook install":         {"--binary", "x"},
 	"hook uninstall":       nil,
 	"send text":            {"--chat", "10", "--message", "hi"},
+	"e2e allow":            {"@my_test_bot"},
+	"e2e disallow":         {"@my_test_bot"},
 	"send file":            {"--chat", "10", "--path", "x"},
 }
 

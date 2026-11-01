@@ -113,7 +113,12 @@ type scanner struct {
 	// content the guard can't see; reported only when decoded or when the
 	// visible command links to the account
 	hiddenRs []hiddenReason
-	st       pathState
+	// linked: a visible word names a protected settings file or dir
+	linked bool
+	st     pathState
+	// remote > 0 while scanning a command ssh runs on another host: its paths
+	// name that host's files, so the local filesystem is not consulted
+	remote int
 }
 
 func newScanner(o Options) *scanner {
@@ -135,6 +140,12 @@ func (s *scanner) scanTop(cmd string) string {
 	}
 	s.script(lx, ctx{})
 	text := blank(cmd, s.inert)
+	s.finish(text)
+	return text
+}
+
+// finish adds the hidden and conditional reasons that apply to text.
+func (s *scanner) finish(text string) {
 	if len(s.hiddenRs) > 0 {
 		related := s.related(text)
 		for _, h := range s.hiddenRs {
@@ -148,7 +159,6 @@ func (s *scanner) scanTop(cmd string) string {
 			s.reasons.add(r)
 		}
 	}
-	return text
 }
 
 func blank(s string, ranges [][2]int) string {
@@ -248,7 +258,11 @@ func (s *scanner) command(cmd *command, c ctx) {
 	for i, w := range cmd.words {
 		if !data[i] {
 			s.envText(w.text) // after quote removal: TGAC_READ''ONLY=0, \=, $'…'
+			s.link(w, c)
 		}
+	}
+	for _, w := range append(append([]token{}, cmd.outRedirs...), cmd.inRedirs...) {
+		s.link(w, c)
 	}
 	s.envTargets(cmd.words, idx)
 	s.pathRules(cmd, idx, data)
@@ -256,6 +270,17 @@ func (s *scanner) command(cmd *command, c ctx) {
 	s.argv(cmd.words, cmd, c)
 	s.track(cmd, idx)
 }
+
+// link notes a visible word naming a local protected settings file or dir
+// (~/.claude, ~/.claude/settings.json, cd ~/.claude && … settings.json).
+func (s *scanner) link(w token, c ctx) {
+	if !s.linked && !c.file && s.remote == 0 && settingsWordRe.MatchString(w.text) && s.settingsPath(w, true) {
+		s.linked = true
+	}
+}
+
+// settingsWordRe pre-filters words before settingsPath touches the disk.
+var settingsWordRe = regexp.MustCompile(`(?i)claude|codex|settings|hooks\.json|config\.toml`)
 
 // dataFlags carry message text (commit messages, PR titles and bodies), not code.
 var dataFlags = set("-m", "--message", "--body", "--title")
@@ -415,15 +440,15 @@ func (s *scanner) argv(words []token, cmd *command, c ctx) {
 			prog = token{kind: tWord, text: v, pat: escMeta(v)}
 		}
 	}
-	if prog.dynamic || prog.glob {
-		s.condAdd(c, "runs a program named by an expansion")
+	if prog.dynamic || prog.glob && prog.text != "[" && prog.text != "[[" {
+		s.opaque(c, "runs a program named by an expansion", s.subsDecode(prog.subs))
 		return
 	}
 	name := base(prog.text)
 	args = xargsArgs(words[:idx], args)
 	switch {
 	case strings.EqualFold(name, BinaryName):
-		s.reasons.add(checkInvocation(args))
+		s.reasons.add(checkInvocation(args, s.o))
 	case name == "parallel":
 		s.parallel(args, c)
 	case name == "watch":
@@ -431,7 +456,7 @@ func (s *scanner) argv(words []token, cmd *command, c ctx) {
 	case name == "hyperfine":
 		s.hyperfine(args, c)
 	case name == "tmux":
-		s.tmux(args, c)
+		s.tmux(args, cmd, c)
 	case name == "alias":
 		for _, a := range args {
 			if mentionRe.MatchString(a.text) {
@@ -448,6 +473,8 @@ func (s *scanner) argv(words []token, cmd *command, c ctx) {
 		for _, a := range args {
 			if len(a.subs) > 0 {
 				s.hidden(reasonBuilt, s.subsDecode(a.subs))
+			} else if a.dynamic {
+				s.opaque(c, reasonBuilt, false) // eval re-parses what the expansion holds
 			}
 		}
 		s.str(joinWords(args), c)
@@ -514,8 +541,14 @@ func (s *scanner) shell(args []token, cmd *command, c ctx) {
 		}
 		return
 	}
+	if !cflag {
+		s.terminalStdin("sh", args, cmd, nil)
+	}
 	s.stdinCode(cmd, c, true)
 }
+
+// sshNoShell are ssh options that open no remote shell.
+var sshNoShell = set("-N", "-W", "-O", "-G", "-Q")
 
 // pipedIn analyses what a command reads from the pipe: the literal text of
 // echo/printf, the files or heredoc of cat. Anything else is unseen: ask.
@@ -552,10 +585,15 @@ func (s *scanner) pipedIn(cmd *command, c ctx, run func(string)) {
 			}
 			if literal && len(args) > 0 {
 				for _, a := range args {
+					if s.remote > 0 {
+						continue // a file on the remote host
+					}
 					if b, err := s.o.ReadFile(s.abs(a.text)); err == nil {
 						run(string(b))
 					} else if !errorsIsNotExist(err) {
 						s.hidden("runs piped code the guard can't read", false)
+					} else {
+						s.opaque(c, reasonMissing+" ("+a.text+")", false)
 					}
 				}
 				return
@@ -572,15 +610,16 @@ func pipeSource(p *command) string {
 	return "a pipe"
 }
 
-func (s *scanner) ssh(args []token, cmd *command, c ctx) {
-	host := false
+// sshCommand returns where the remote command starts in ssh's args (len(args)
+// when there is none) and whether a host was given.
+func sshCommand(args []token) (start int, host bool) {
 	for i := 0; i < len(args); i++ {
 		t := args[i].text
 		if t == "--" {
 			if !host {
 				continue
 			}
-			i++
+			return i + 1, true
 		} else if strings.HasPrefix(t, "-") {
 			if sshValues[t] {
 				i++
@@ -590,18 +629,31 @@ func (s *scanner) ssh(args []token, cmd *command, c ctx) {
 			host = true
 			continue
 		}
-		if rest := args[i:]; len(rest) > 0 {
-			for _, a := range rest {
-				if len(a.subs) > 0 {
-					s.hidden(reasonBuilt, s.subsDecode(a.subs))
-				}
+		return i, true
+	}
+	return len(args), host
+}
+
+func (s *scanner) ssh(args []token, cmd *command, c ctx) {
+	s.remote++
+	defer func() { s.remote-- }()
+	start, host := sshCommand(args)
+	if rest := args[start:]; len(rest) > 0 {
+		for _, a := range rest {
+			if len(a.subs) > 0 {
+				s.hidden(reasonBuilt, s.subsDecode(a.subs))
 			}
-			s.str(joinWords(rest), c)
-			return
 		}
+		s.str(joinWords(rest), c)
+		return
 	}
 	if host {
-		s.stdinCode(cmd, c, true)
+		s.terminalStdin("ssh", args, cmd, sshNoShell)
+		s.stdinText(cmd, c, true)
+		// a redirected or piped file is read on this host
+		s.remote--
+		s.stdinFiles(cmd, c, true)
+		s.remote++
 	}
 }
 
@@ -623,7 +675,7 @@ func (s *scanner) goRun(args []token, c ctx) {
 		}
 		pkg = strings.TrimSuffix(pkg, "/")
 		if base(pkg) == BinaryName || (strings.HasPrefix(pkg, ".") && base(absPath(pkg, s.o)) == BinaryName) {
-			s.reasons.add(checkInvocation(args[j+1:]))
+			s.reasons.add(checkInvocation(args[j+1:], s.o))
 			return
 		}
 		for ; j < len(args) && strings.HasSuffix(args[j].text, ".go"); j++ {
@@ -652,6 +704,9 @@ func (s *scanner) file(p string, mode fileMode, c ctx) {
 	}
 	s.files[full] = true
 	content, ok := s.written[full]
+	if !ok && s.remote > 0 {
+		return // a script on the remote host
+	}
 	if !ok {
 		b, err := s.o.ReadFile(full)
 		if errors.Is(err, errTooBig) && bytes.IndexByte(b, 0) >= 0 {
@@ -660,6 +715,8 @@ func (s *scanner) file(p string, mode fileMode, c ctx) {
 		if err != nil {
 			if !errorsIsNotExist(err) {
 				s.hidden("runs "+base(full)+", which the guard can't read ("+err.Error()+")", false)
+			} else {
+				s.opaque(c, reasonMissing+" ("+p+")", false)
 			}
 			return
 		}

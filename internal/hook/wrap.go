@@ -28,6 +28,8 @@ func gluedValue(f string, flags map[string]bool) (string, bool) {
 func (s *scanner) cmdString(w token, c ctx) {
 	if len(w.subs) > 0 {
 		s.hidden(reasonBuilt, s.subsDecode(w.subs))
+	} else if w.dynamic {
+		s.opaque(c, reasonBuilt, false) // the shell re-parses what the expansion holds
 	}
 	s.str(w.text, c)
 }
@@ -195,7 +197,7 @@ func (s *scanner) hyperfine(args []token, c ctx) {
 var tmuxValues = set("-t", "-s", "-n", "-c", "-F", "-x", "-y", "-e", "-l", "-L", "-S", "-f", "-N")
 
 // tmux analyses commands tmux runs or types into a pane.
-func (s *scanner) tmux(args []token, c ctx) {
+func (s *scanner) tmux(args []token, cmd *command, c ctx) {
 	i := 0
 	for ; i < len(args) && strings.HasPrefix(args[i].text, "-"); i++ {
 		if tmuxValues[args[i].text] {
@@ -203,19 +205,28 @@ func (s *scanner) tmux(args []token, c ctx) {
 		}
 	}
 	if i >= len(args) {
+		s.terminalStdin("tmux", args, cmd, nil) // bare tmux: new-session with a shell on this terminal
 		return
 	}
 	sub := args[i].text
 	var rest []token
+	detached := false
 	for i++; i < len(args); i++ {
 		t := args[i].text
 		if strings.HasPrefix(t, "-") && len(t) > 1 {
+			detached = detached || !strings.HasPrefix(t, "--") && strings.ContainsRune(t, 'd')
 			if tmuxValues[t] {
 				i++
 			}
 			continue
 		}
 		rest = append(rest, args[i])
+	}
+	switch sub {
+	case "new-session", "new", "attach-session", "attach", "a":
+		if !detached && (len(rest) == 0 || sub[0] == 'a') {
+			s.terminalStdin("tmux", nil, cmd, nil) // a shell on this terminal
+		}
 	}
 	switch sub {
 	case "new-session", "new", "new-window", "neww", "split-window", "splitw", "respawn-pane", "respawnp",

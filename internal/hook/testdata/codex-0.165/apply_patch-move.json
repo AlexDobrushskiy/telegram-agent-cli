@@ -1,0 +1,14 @@
+{
+ "session_id": "01a19721-6ab2-7963-a1b0-09d4770ff84b",
+ "turn_id": "01a19721-6c7d-7743-b3f9-61720dc23153",
+ "transcript_path": "/xhome/u/.codex/sessions/2026/11/01/rollout-2026-11-01T12-41-52-01a19721-6ab2-7963-a1b0-09d4770ff84b.jsonl",
+ "cwd": "/work",
+ "hook_event_name": "PreToolUse",
+ "model": "gpt-6-astra",
+ "permission_mode": "bypassPermissions",
+ "tool_name": "apply_patch",
+ "tool_input": {
+  "command": "*** Begin Patch\n*** Update File: /work/note.txt\n*** Move to: /work/note2.txt\n@@\n-hi\n+hello\n*** End Patch"
+ },
+ "tool_use_id": "exec-386dc267-df3a-4bac-bb66-fb7d483a8034"
+}

@@ -17,6 +17,7 @@ func init() {
 		return group("hook", "Claude Code guard hook: ask the owner before Telegram writes")
 	})
 	register("hook", (*App).hookPreToolUseCmd)
+	register("hook", (*App).hookCodexPreToolUseCmd)
 	register("hook", (*App).hookInstallCmd)
 	register("hook", (*App).hookUninstallCmd)
 }
@@ -34,6 +35,7 @@ func (a *App) hookOptions() hook.Options {
 	}
 	o.DataDirs = dirs
 	o.WatcherEnvs = hook.WatcherEnvsFor(dirs)
+	o.E2EAllowed = hook.E2EAllowedFor(dirs)
 	return o
 }
 
@@ -51,6 +53,25 @@ func (a *App) hookPreToolUseCmd() *cobra.Command {
 				return c.Help()
 			}
 			_ = hook.Run(a.Stdin, a.Stdout, a.hookOptions())
+			return nil
+		},
+	}
+}
+
+func (a *App) hookCodexPreToolUseCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "codex-pretooluse",
+		Short: "Codex PreToolUse hook: like claude-pretooluse, but denies (Codex has no \"ask\")",
+		Long: "Codex PreToolUse hook (hooks.json / [hooks] in config.toml, matcher \".*\"). Reads the tool call\n" +
+			"as JSON on stdin and runs the same checks as claude-pretooluse. Codex cannot ask, so a call\n" +
+			"that would need the owner's OK is denied with the reason (run it yourself, outside the agent);\n" +
+			"otherwise prints nothing. Always exits 0.",
+		DisableFlagParsing: true,
+		RunE: func(c *cobra.Command, args []string) error {
+			if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
+				return c.Help()
+			}
+			_ = hook.RunCodex(a.Stdin, a.Stdout, a.hookOptions())
 			return nil
 		},
 	}

@@ -56,6 +56,26 @@ func WatcherEnvsFor(dirs []string) []string {
 	return names
 }
 
+// E2EAllowedFor returns the e2e.allowed_chats entries of each data dir's config.json.
+func E2EAllowedFor(dirs []string) []string {
+	var out []string
+	for _, d := range dirs {
+		b, err := readScript(filepath.Join(d, "config.json"))
+		if err != nil {
+			continue
+		}
+		var c struct {
+			E2E struct {
+				Allowed []string `json:"allowed_chats"`
+			} `json:"e2e"`
+		}
+		if json.Unmarshal(b, &c) == nil {
+			out = append(out, c.E2E.Allowed...)
+		}
+	}
+	return out
+}
+
 func contains1(xs []string, x string) bool {
 	for _, y := range xs {
 		if y == x {
