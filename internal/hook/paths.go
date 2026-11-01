@@ -268,8 +268,8 @@ func (s *scanner) pathRelation(w token) (inside, above bool) {
 		}
 		for _, alt := range expandBraces(p) {
 			comps := splitPat(alt)
-			if !hasGlob(alt) {
-				// a concrete path: also resolve symlinks
+			if !hasGlob(alt) && s.remote == 0 {
+				// a concrete local path: also resolve symlinks
 				real := resolvePath(unescape(alt), s.o)
 				comps2 := splitPat(escMeta(real))
 				for _, d := range s.dirs {
@@ -410,6 +410,11 @@ func hiddenBetween(op []string, dir []string) bool {
 
 // pathRules checks a command's words, redirect targets and recursive reads.
 func (s *scanner) pathRules(cmd *command, idx int, data map[int]bool) {
+	remoteFrom := len(cmd.words) // words of a command ssh runs name remote files
+	if idx >= 0 && base(cmd.words[idx].text) == "ssh" {
+		start, _ := sshCommand(cmd.words[idx+1:])
+		remoteFrom = idx + 1 + start
+	}
 	for i, w := range cmd.words {
 		if data[i] {
 			continue
@@ -417,7 +422,14 @@ func (s *scanner) pathRules(cmd *command, idx int, data map[int]bool) {
 		if segmentRe.MatchString(w.text) {
 			s.reasons.add(reasonDataDir)
 		}
-		if in, _ := s.pathRelation(w); in {
+		if i >= remoteFrom {
+			s.remote++
+		}
+		in, _ := s.pathRelation(w)
+		if i >= remoteFrom {
+			s.remote--
+		}
+		if in {
 			s.reasons.add(reasonDataDir)
 		}
 	}

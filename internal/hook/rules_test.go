@@ -474,3 +474,57 @@ func TestReadScriptOnlyRegularFiles(t *testing.T) {
 		t.Error("readScript opened a device")
 	}
 }
+
+// A command ssh runs names files on the remote host: the guard must not read or
+// resolve them locally (on macOS /home is an automount, ~0.2 s per lookup, which
+// pushed long ssh commands past the deadline into an ask).
+func TestSSHRemotePathsStayRemote(t *testing.T) {
+	var reads []string
+	o := testOptions()
+	o.ReadFile = func(p string) ([]byte, error) {
+		reads = append(reads, p)
+		return nil, fs.ErrNotExist
+	}
+	for _, cmd := range []string{
+		"ssh server 'cd /home/alex/immich && bash ./upgrade.sh && cat notes.txt | sh'",
+		"ssh server bash /home/alex/x.sh",
+		"ssh server <<'EOF'\nsource /home/alex/.env\nEOF",
+	} {
+		reads = nil
+		if r := CheckBash(cmd, o); len(r) != 0 {
+			t.Errorf("%q: unexpected ask %v", cmd, r)
+		}
+		if len(reads) != 0 {
+			t.Errorf("%q: read local files %v for a remote command", cmd, reads)
+		}
+	}
+	// the same script run locally is still read
+	reads = nil
+	CheckBash("bash /home/alex/x.sh", o)
+	if len(reads) == 0 {
+		t.Error("local script not read")
+	}
+
+	// a local symlink into the data dir is followed locally, not for a remote path
+	tmp := t.TempDir()
+	data := filepath.Join(tmp, "data")
+	if err := os.Mkdir(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(tmp, "link")
+	if err := os.Symlink(data, link); err != nil {
+		t.Fatal(err)
+	}
+	so := Options{DataDirs: []string{data}, UserHome: tmp}
+	p := filepath.Join(link, "session.json")
+	if r := CheckBash("cat "+p, so); len(r) == 0 {
+		t.Error("local read through a symlink not caught")
+	}
+	if r := CheckBash("ssh box cat "+p, so); len(r) != 0 {
+		t.Errorf("remote path resolved through a local symlink: %v", r)
+	}
+	// the data dir named directly stays protected on the remote host too
+	if r := CheckBash("ssh box cat ~/.config/telegram-agent-cli/session.json", testOptions()); len(r) == 0 {
+		t.Error("remote data dir path not caught")
+	}
+}

@@ -91,7 +91,9 @@ func mentionsAccount(ti map[string]any, o Options) bool {
 const maxInput = 16 << 20
 
 // DefaultDeadline bounds one check; past it the hook asks instead of waiting.
-const DefaultDeadline = 3 * time.Second
+// It stays under the 10 s hook timeout the installer writes, with room for a
+// loaded machine: a check that runs out of time stops the agent for an answer.
+const DefaultDeadline = 8 * time.Second
 
 // Run reads one PreToolUse payload from r and writes an "ask" decision to w when
 // the call needs the owner's OK, or when the check does not finish within the
