@@ -99,6 +99,21 @@ type Config struct {
 	LangCode          string `json:"lang_code,omitempty"`
 	WatcherSessionEnv string `json:"watcher_session_env,omitempty"`
 	GlobalPerHour     int    `json:"global_per_hour,omitempty"`
+	E2E               *E2E   `json:"e2e,omitempty"`
+}
+
+// E2E configures the e2e test harness: the bots it may write to.
+type E2E struct {
+	// AllowedChats are bot @usernames or numeric ids; e2e writes go to these only.
+	AllowedChats []string `json:"allowed_chats,omitempty"`
+}
+
+// E2EAllowed returns e2e.allowed_chats (nil when unset).
+func (c Config) E2EAllowed() []string {
+	if c.E2E == nil {
+		return nil
+	}
+	return c.E2E.AllowedChats
 }
 
 // WithDefaults fills empty optional fields. appVersion is the binary's version.

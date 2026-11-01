@@ -36,6 +36,8 @@ type App struct {
 
 	// Connect runs fn on an authorised session (tgclient.RunSession).
 	Connect func(ctx context.Context, opts tgclient.Options, fn func(context.Context, tgclient.Telegram) error) error
+	// ConnectE2E runs fn on an authorised session with updates on (tgclient.RunE2E).
+	ConnectE2E func(ctx context.Context, opts tgclient.Options, fn func(context.Context, tgclient.E2E) error) error
 	// Raw runs fn on a bare connection (tgclient.Run); used by auth and doctor.
 	Raw func(ctx context.Context, opts tgclient.Options, fn func(context.Context, *tgclient.Conn) error) error
 
@@ -85,12 +87,13 @@ func New() (*App, error) {
 		return nil, err
 	}
 	a := &App{
-		Paths:   config.Paths{Home: home},
-		Stdout:  os.Stdout,
-		Stderr:  os.Stderr,
-		Stdin:   os.Stdin,
-		Connect: tgclient.RunSession,
-		Raw:     tgclient.Run,
+		Paths:      config.Paths{Home: home},
+		Stdout:     os.Stdout,
+		Stderr:     os.Stderr,
+		Stdin:      os.Stdin,
+		Connect:    tgclient.RunSession,
+		ConnectE2E: tgclient.RunE2E,
+		Raw:        tgclient.Run,
 		StdinIsTerminal: func() bool {
 			return term.IsTerminal(int(os.Stdin.Fd()))
 		},
@@ -172,7 +175,13 @@ var readCommands = map[string]bool{
 	"me": true, "doctor": true, "version": true, "auth status": true,
 	// Its own gate: registry, scopes and rate limits; the guard grants one send.
 	"watch reply": true, "watch list": true, "watch check": true,
-	"hook claude-pretooluse": true,
+	"hook claude-pretooluse": true, "hook codex-pretooluse": true,
+	// Their own gate: allow-listed bots only (e2e.allowed_chats); the guard grants
+	// sends to that bot alone. e2e allow/disallow change the config: writes.
+	"e2e send text": true, "e2e send photo": true, "e2e send voice": true, "e2e send file": true,
+	"e2e send location": true, "e2e react": true, "e2e press": true, "e2e web-app-data": true,
+	"e2e webapp-url": true, "e2e read messages": true, "e2e read keyboard": true, "e2e read pinned": true,
+	"e2e wait": true, "e2e status": true,
 }
 
 // dryRunReads are writes that change nothing with --dry-run.

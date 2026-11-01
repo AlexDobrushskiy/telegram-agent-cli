@@ -212,15 +212,22 @@ func uploadMedia(ctx context.Context, api *tg.Client, path string) (tg.InputMedi
 	if (ext == ".jpg" || ext == ".jpeg" || ext == ".png") && st.Size() <= maxPhotoBytes {
 		return &tg.InputMediaUploadedPhoto{File: f}, nil
 	}
-	mt := mime.TypeByExtension(ext)
+	return &tg.InputMediaUploadedDocument{
+		File: f, MimeType: mimeFor(path),
+		Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: baseName(path)}},
+	}, nil
+}
+
+// mimeFor guesses a file's MIME type from its extension.
+func mimeFor(path string) string {
+	mt := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
 	if i := strings.IndexByte(mt, ';'); i >= 0 {
 		mt = mt[:i]
 	}
 	if mt == "" {
 		mt = "application/octet-stream"
 	}
-	return &tg.InputMediaUploadedDocument{
-		File: f, MimeType: mt,
-		Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: filepath.Base(path)}},
-	}, nil
+	return mt
 }
+
+func baseName(path string) string { return filepath.Base(path) }

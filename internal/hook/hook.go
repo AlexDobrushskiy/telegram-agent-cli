@@ -3,6 +3,7 @@ package hook
 import (
 	"encoding/json"
 	"io"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -97,12 +98,51 @@ const DefaultDeadline = 3 * time.Second
 // the call needs the owner's OK, or when the check does not finish within the
 // deadline. Bad input produces no output.
 func Run(r io.Reader, w io.Writer, o Options) error {
+	return runHook(r, w, o, "ask", Evaluate)
+}
+
+// RunCodex is Run for Codex's PreToolUse hook. Codex has no "ask" (it treats it
+// as a hook failure and runs the call), so every call Run would ask about is
+// denied instead, with the reason. Codex's other tools (apply_patch, MCP calls)
+// are denied when their input names a data dir or a settings/hook file.
+func RunCodex(r io.Reader, w io.Writer, o Options) error {
+	return runHook(r, w, o, "deny", EvaluateCodex)
+}
+
+// EvaluateCodex is Evaluate plus a check of tools Claude Code doesn't have.
+func EvaluateCodex(in Input, o Options) string {
+	if r := Evaluate(in, o); r != "" {
+		return r
+	}
+	if in.ToolName == "Bash" || in.ToolName == "Monitor" || fileTools[in.ToolName] {
+		return ""
+	}
+	b, err := json.Marshal(in.ToolInput)
+	if err != nil {
+		return "Telegram account data: the guard could not read this " + in.ToolName + " call"
+	}
+	text := string(b)
+	for _, re := range dirPatterns(o) {
+		if re.MatchString(text) {
+			return "Telegram account data: " + in.ToolName + " " + reasonDataDir
+		}
+	}
+	if codexHookRe.MatchString(text) || settingsCodeRe.MatchString(text) {
+		return "Telegram account guard: " + in.ToolName + " touches agent settings or hook config"
+	}
+	return ""
+}
+
+// codexHookRe names a Codex hook config file.
+var codexHookRe = regexp.MustCompile(`(?i)\.codex[/\\]+(?:hooks\.json|config\.toml)`)
+
+func runHook(r io.Reader, w io.Writer, o Options, decision string, eval func(Input, Options) string) error {
 	deadline := o.Deadline
 	if deadline <= 0 {
 		deadline = DefaultDeadline
 	}
 	done := make(chan string, 1)
-	go func() { done <- evaluateRaw(r, o) }()
+	go func() { done <- evaluateRaw(r, o, eval) }()
 	var reason string
 	select {
 	case reason = <-done:
@@ -114,7 +154,7 @@ func Run(r io.Reader, w io.Writer, o Options) error {
 	}
 	var d Decision
 	d.HookSpecificOutput.HookEventName = "PreToolUse"
-	d.HookSpecificOutput.PermissionDecision = "ask"
+	d.HookSpecificOutput.PermissionDecision = decision
 	d.HookSpecificOutput.PermissionDecisionReason = reason
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
@@ -122,7 +162,7 @@ func Run(r io.Reader, w io.Writer, o Options) error {
 }
 
 // evaluateRaw reads and checks one payload; bad input gives "".
-func evaluateRaw(r io.Reader, o Options) (reason string) {
+func evaluateRaw(r io.Reader, o Options, eval func(Input, Options) string) (reason string) {
 	raw, err := io.ReadAll(io.LimitReader(r, maxInput))
 	if err != nil {
 		return ""
@@ -140,5 +180,5 @@ func evaluateRaw(r io.Reader, o Options) (reason string) {
 	if json.Unmarshal(raw, &in) != nil {
 		return ""
 	}
-	return Evaluate(in, o)
+	return eval(in, o)
 }

@@ -29,11 +29,14 @@ var readAllow = map[string][]string{
 	"media":    {"download"},
 	"auth":     {"status"},
 	"watch":    {"reply", "list", "check"}, // reply is its own gate: registry, scope, rate limits
-	"hook":     {"claude-pretooluse"},
-	"me":       nil,
-	"doctor":   nil,
-	"version":  nil,
-	"help":     nil,
+	"hook":     {"claude-pretooluse", "codex-pretooluse"},
+	// e2e writes are their own gate: the binary sends only to bots already in
+	// e2e.allowed_chats. allow/disallow change that list, so they are writes.
+	"e2e":     {"send", "react", "press", "web-app-data", "webapp-url", "read", "wait", "status"},
+	"me":      nil,
+	"doctor":  nil,
+	"version": nil,
+	"help":    nil,
 }
 
 // boolFlags never take a value; any other "--flag" without "=" may eat the next word.
@@ -41,6 +44,7 @@ var boolFlags = map[string]bool{
 	"-h": true, "--help": true, "--json": true, "--unread": true, "--archived": true,
 	"--asc": true, "--dms": true, "--groups": true, "--mentions": true,
 	"--dry-run": true, "--force": true, "--no-verify": true,
+	"--remove": true, "--keyboard": true, "--menu": true, "--main": true, "--all": true,
 }
 
 // secretFiles are the data-dir files the Read tool may not open without asking.
@@ -69,7 +73,9 @@ type Options struct {
 	XDGConfigHome string
 	// ClaudeConfigDir is $CLAUDE_CONFIG_DIR; ~/.claude and every .claude dir are always protected.
 	ClaudeConfigDir string
-	Deadline        time.Duration // Run's time budget (DefaultDeadline if zero)
+	// CodexHome is $CODEX_HOME; hooks.json/config.toml there and in every .codex dir are protected.
+	CodexHome string
+	Deadline  time.Duration // Run's time budget (DefaultDeadline if zero)
 }
 
 // DefaultOptions protects $TGAC_HOME (if set) and the default data dir.
@@ -88,6 +94,7 @@ func DefaultOptions() Options {
 	o.WatcherEnvs = WatcherEnvsFor(o.DataDirs)
 	o.XDGConfigHome = os.Getenv("XDG_CONFIG_HOME")
 	o.ClaudeConfigDir = os.Getenv("CLAUDE_CONFIG_DIR")
+	o.CodexHome = os.Getenv("CODEX_HOME")
 	return o
 }
 

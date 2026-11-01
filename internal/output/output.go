@@ -21,6 +21,8 @@ const (
 	ExitRPC      = 5 // Telegram RPC error or flood wait
 	ExitLockBusy = 6
 	ExitWatcher  = 7 // watcher refused to send
+	ExitE2E      = 8 // e2e write refused: target not an allow-listed bot
+	ExitTimeout  = 9 // e2e wait ended without the awaited event
 )
 
 // Error codes (the "code" field of the error object).
@@ -34,6 +36,8 @@ const (
 	CodeFloodWait      = "flood_wait"
 	CodeLockBusy       = "lock_busy"
 	CodeWatcherRefused = "watcher_refused"
+	CodeE2ERefused     = "e2e_refused"
+	CodeTimeout        = "timeout"
 	CodeInternal       = "internal"
 )
 
@@ -83,6 +87,12 @@ func LockBusy(format string, a ...any) *Error {
 }
 func WatcherRefused(format string, a ...any) *Error {
 	return newErr(CodeWatcherRefused, ExitWatcher, format, a...)
+}
+func E2ERefused(format string, a ...any) *Error {
+	return newErr(CodeE2ERefused, ExitE2E, format, a...)
+}
+func Timeout(format string, a ...any) *Error {
+	return newErr(CodeTimeout, ExitTimeout, format, a...)
 }
 func Internal(format string, a ...any) *Error {
 	return newErr(CodeInternal, ExitInternal, format, a...)

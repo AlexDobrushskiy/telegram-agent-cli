@@ -229,18 +229,129 @@ func AllowOnce(ctx context.Context, method string) context.Context {
 	return context.WithValue(ctx, grantKey{}, &grant{method: method})
 }
 
+// botMethods are the writes an e2e grant lets through, and only to its bot.
+var botMethods = map[string]bool{
+	"messages.sendMessage":          true,
+	"messages.sendMedia":            true,
+	"messages.sendReaction":         true,
+	"messages.getBotCallbackAnswer": true,
+	"messages.sendWebViewData":      true,
+	"messages.requestSimpleWebView": true,
+	"messages.requestWebView":       true,
+	"messages.requestMainWebView":   true,
+}
+
+// uploadMethods carry file parts for a send; they name no peer and are private
+// to the account until a send uses them.
+var uploadMethods = map[string]bool{
+	"upload.saveFilePart":    true,
+	"upload.saveBigFilePart": true,
+}
+
+type botGrantKey struct{}
+
+// AllowBot returns a ctx under which the e2e writes (sends, reactions, button
+// presses, Mini App data and URLs, and their file uploads) pass read-only mode
+// when they address the user botID and nobody else. Always-denied methods and
+// write-like arguments stay blocked.
+func AllowBot(ctx context.Context, botID int64) context.Context {
+	return context.WithValue(ctx, botGrantKey{}, botID)
+}
+
+// BotMethods lists the methods an AllowBot grant covers (sorted), for docs and tests.
+func BotMethods() []string {
+	var out []string
+	for m := range botMethods {
+		out = append(out, m)
+	}
+	for m := range uploadMethods {
+		out = append(out, m)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// userIDs returns the user ids a request addresses; ok is false when one of its
+// targets is not a plain user (a chat, a channel, "self", a peer from a message).
+func userIDs(req any) (ids []int64, ok bool) {
+	peer := func(p tg.InputPeerClass) bool {
+		if u, isUser := p.(*tg.InputPeerUser); isUser {
+			ids = append(ids, u.UserID)
+			return true
+		}
+		return false
+	}
+	user := func(u tg.InputUserClass) bool {
+		if v, isUser := u.(*tg.InputUser); isUser {
+			ids = append(ids, v.UserID)
+			return true
+		}
+		return false
+	}
+	switch r := req.(type) {
+	case *tg.MessagesSendMessageRequest:
+		ok = peer(r.Peer)
+	case *tg.MessagesSendMediaRequest:
+		ok = peer(r.Peer)
+	case *tg.MessagesSendReactionRequest:
+		ok = peer(r.Peer)
+	case *tg.MessagesGetBotCallbackAnswerRequest:
+		ok = peer(r.Peer)
+	case *tg.MessagesSendWebViewDataRequest:
+		ok = user(r.Bot)
+	case *tg.MessagesRequestSimpleWebViewRequest:
+		ok = user(r.Bot)
+	case *tg.MessagesRequestWebViewRequest:
+		ok = peer(r.Peer) && user(r.Bot)
+	case *tg.MessagesRequestMainWebViewRequest:
+		ok = peer(r.Peer) && user(r.Bot)
+	}
+	return ids, ok
+}
+
+// botAllowed reports whether req may pass under an AllowBot grant for botID.
+func botAllowed(req any, botID int64) bool {
+	name := MethodName(req)
+	if uploadMethods[name] {
+		return true
+	}
+	if !botMethods[name] {
+		return false
+	}
+	ids, ok := userIDs(req)
+	if !ok || len(ids) == 0 {
+		return false
+	}
+	for _, id := range ids {
+		if id != botID {
+			return false
+		}
+	}
+	return true
+}
+
 // Middleware is the gotd middleware; readOnly is evaluated per call.
 func Middleware(readOnly func() bool, authMode bool) telegram.Middleware {
 	return telegram.MiddlewareFunc(func(next tg.Invoker) telegram.InvokeFunc {
 		return func(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
 			if err := Check(input, readOnly(), authMode); err != nil {
 				var be *BlockedError
-				g, _ := ctx.Value(grantKey{}).(*grant)
-				if !errors.As(err, &be) || be.Always || riskyArgument(input) != "" || !g.take(MethodName(input)) {
+				if !errors.As(err, &be) || be.Always || riskyArgument(input) != "" || !granted(ctx, input) {
 					return err
 				}
 			}
 			return next.Invoke(ctx, input, output)
 		}
 	})
+}
+
+// granted reports whether a ctx grant lets a blocked request through. Wrapped
+// requests are never granted.
+func granted(ctx context.Context, input bin.Encoder) bool {
+	req := any(input)
+	if botID, ok := ctx.Value(botGrantKey{}).(int64); ok && botID != 0 && botAllowed(req, botID) {
+		return true
+	}
+	g, _ := ctx.Value(grantKey{}).(*grant)
+	return g.take(MethodName(req))
 }

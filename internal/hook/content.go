@@ -53,6 +53,9 @@ func settingsTarget(p string, o Options) bool {
 		if b == "managed-settings.json" || b == ".claude" {
 			return true
 		}
+		if codexHookFile(q, o) {
+			return true
+		}
 		isDir := func(d string) bool {
 			if strings.EqualFold(filepath.Base(d), ".claude") {
 				return true
@@ -80,6 +83,20 @@ func settingsTarget(p string, o Options) bool {
 		}
 	}
 	return false
+}
+
+// codexHookFile reports whether p is a file Codex loads hooks from: hooks.json
+// or config.toml in a .codex dir or in $CODEX_HOME.
+func codexHookFile(p string, o Options) bool {
+	b := strings.ToLower(filepath.Base(p))
+	if b != "hooks.json" && b != "config.toml" {
+		return false
+	}
+	dir := filepath.Dir(p)
+	if strings.EqualFold(filepath.Base(dir), ".codex") {
+		return true
+	}
+	return o.CodexHome != "" && within(dir, o.CodexHome) && within(o.CodexHome, dir)
 }
 
 // projection is the part of a settings file the guard depends on, canonical.
