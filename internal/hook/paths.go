@@ -19,10 +19,51 @@ var segmentRe = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_.-])` + regexp.QuoteMet
 
 const dataFileAlt = `(?:config\.json|session\.json|peers\.json|pending-login\.json|watchers\.json|answered\.jsonl|PAUSE-ALL)`
 
-const (
-	reasonDataDir   = "touches the " + BinaryName + " data dir (session keys, config, watcher registry)"
-	reasonParentDir = "reads a directory tree that contains the " + BinaryName + " data dir"
-)
+const reasonDataDir = "touches the " + BinaryName + " data dir (session keys, config, watcher registry)"
+
+// dirPatterns match a data dir inside a word (curl -F f=@~/.config/telegram-agent-cli/session.json):
+// the absolute, ~, $HOME and ${HOME} forms of each, plus the default location
+// in any form. A longer name (telegram-agent-cli-notes) is not the dir.
+func dirPatterns(o Options) []*regexp.Regexp {
+	forms := []string{"/.config/" + BinaryName, "XDG_CONFIG_HOME}/" + BinaryName, "XDG_CONFIG_HOME/" + BinaryName}
+	for _, d := range o.DataDirs {
+		d = filepath.Clean(d)
+		forms = append(forms, d)
+		if real, err := filepath.EvalSymlinks(d); err == nil && real != d {
+			forms = append(forms, real)
+		}
+		if o.UserHome != "" {
+			if rel, ok := strings.CutPrefix(d, filepath.Clean(o.UserHome)+"/"); ok {
+				forms = append(forms, "~/"+rel, "$HOME/"+rel, "${HOME}/"+rel)
+			}
+		}
+	}
+	res := make([]*regexp.Regexp, 0, len(forms))
+	for _, f := range forms {
+		left := `(?:^|[^A-Za-z0-9_-])`
+		if strings.HasPrefix(f, "/") {
+			left = `(?:^|[^A-Za-z0-9_.-])`
+		}
+		res = append(res, regexp.MustCompile(`(?i)`+left+regexp.QuoteMeta(f)+`(?:$|[^A-Za-z0-9_.-])`))
+	}
+	return res
+}
+
+// namesDataDir reports whether a word (not prose: no blanks) holds a data-dir path.
+func (s *scanner) namesDataDir(w token) bool {
+	if strings.ContainsAny(w.text, " \t\n") {
+		return false
+	}
+	if segmentRe.MatchString(w.text) {
+		return true
+	}
+	for _, re := range s.dirRes {
+		if re.MatchString(w.text) {
+			return true
+		}
+	}
+	return false
+}
 
 // pathState is what the shell knows while the command runs: cwd ("" = unknown) and variables.
 type pathState struct {
@@ -286,129 +327,8 @@ func (s *scanner) pathRelation(w token) (inside, above bool) {
 	return inside, above
 }
 
-// recursiveReader returns the operands a program reads as whole directory
-// trees (nil if it does not), and whether hidden directories are skipped.
-func recursiveReader(prog string, args []token, data map[int]bool, off int, next *command) (ops []token, skipsHidden bool) {
-	nonFlag := func(values map[string]bool) []token {
-		var out []token
-		for i := 0; i < len(args); i++ {
-			t := args[i].text
-			if data[off+i] {
-				continue
-			}
-			if t == "--" {
-				for k := i + 1; k < len(args); k++ {
-					if !data[off+k] {
-						out = append(out, args[k])
-					}
-				}
-				break
-			}
-			if strings.HasPrefix(t, "-") && len(t) > 1 {
-				if values[t] {
-					i++
-				}
-				continue
-			}
-			out = append(out, args[i])
-		}
-		return out
-	}
-	cwd := token{text: ".", pat: "."}
-	orCwd := func(ops []token) []token {
-		if len(ops) == 0 {
-			return []token{cwd}
-		}
-		return ops
-	}
-	hasFlag := func(pred func(string) bool) bool {
-		for _, a := range args {
-			if pred(a.text) {
-				return true
-			}
-		}
-		return false
-	}
-	cluster := func(letters string) func(string) bool {
-		return func(t string) bool {
-			return len(t) > 1 && t[0] == '-' && t[1] != '-' && strings.ContainsAny(t[1:], letters)
-		}
-	}
-	switch prog {
-	case "grep", "egrep", "fgrep", "ggrep", "zgrep":
-		rec := hasFlag(func(t string) bool {
-			return t == "--recursive" || t == "--dereference-recursive" || t == "--directories=recurse" ||
-				cluster("rR")(t)
-		})
-		for i, a := range args {
-			if a.text == "-d" && i+1 < len(args) && args[i+1].text == "recurse" {
-				rec = true
-			}
-		}
-		if rec {
-			return orCwd(nonFlag(grepValues)), false
-		}
-	case "rg", "ag", "ack", "ugrep", "pt", "sift":
-		hidden := prog == "ack" || prog == "ugrep" || hasFlag(func(t string) bool {
-			return t == "--hidden" || t == "-." || t == "-uu" || t == "-uuu" || t == "-u" && prog == "ag" || t == "--unrestricted"
-		})
-		return orCwd(nonFlag(grepValues)), !hidden
-	case "find":
-		act := hasFlag(func(t string) bool {
-			switch t {
-			case "-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls":
-				return true
-			}
-			return false
-		})
-		if next != nil {
-			for _, w := range next.words {
-				if assignRe.MatchString(w.text) {
-					continue
-				}
-				switch base(w.text) {
-				case "xargs", "parallel", "cpio", "tar", "zip", "rsync", "sh", "bash", "zsh", "while":
-					act = true
-				}
-				break
-			}
-		}
-		if !act {
-			return nil, false
-		}
-		var out []token
-		for _, a := range args {
-			if strings.HasPrefix(a.text, "-") || a.text == "(" || a.text == "!" {
-				break
-			}
-			out = append(out, a)
-		}
-		return orCwd(out), false
-	case "cp", "scp":
-		if hasFlag(cluster("rRa")) || hasFlag(func(t string) bool { return t == "--recursive" || t == "--archive" }) {
-			return nonFlag(nil), false
-		}
-	case "tar", "bsdtar", "gtar", "zip", "7z", "7za", "7zz", "rsync", "ditto", "pax", "cpio", "rclone",
-		"restic", "borg", "duplicity", "gsutil", "rar":
-		return nonFlag(nil), false
-	case "aws":
-		return nonFlag(nil), false
-	}
-	return nil, false
-}
-
-// hiddenBetween reports whether the data dir sits under a hidden directory
-// below the operand (rg and ag skip those).
-func hiddenBetween(op []string, dir []string) bool {
-	for j := len(op); j < len(dir); j++ {
-		if strings.HasPrefix(dir[j], ".") {
-			return true
-		}
-	}
-	return false
-}
-
-// pathRules checks a command's words, redirect targets and recursive reads.
+// pathRules checks a command's words and redirect targets for data-dir paths.
+// Message text and search patterns (data) and prose are not paths.
 func (s *scanner) pathRules(cmd *command, idx int, data map[int]bool) {
 	remoteFrom := len(cmd.words) // words of a command ssh runs name remote files
 	if idx >= 0 && base(cmd.words[idx].text) == "ssh" {
@@ -419,9 +339,6 @@ func (s *scanner) pathRules(cmd *command, idx int, data map[int]bool) {
 		if data[i] {
 			continue
 		}
-		if segmentRe.MatchString(w.text) {
-			s.reasons.add(reasonDataDir)
-		}
 		if i >= remoteFrom {
 			s.remote++
 		}
@@ -429,31 +346,13 @@ func (s *scanner) pathRules(cmd *command, idx int, data map[int]bool) {
 		if i >= remoteFrom {
 			s.remote--
 		}
-		if in {
+		if in || s.namesDataDir(w) {
 			s.reasons.add(reasonDataDir)
 		}
 	}
 	for _, w := range cmd.redirs {
-		if in, _ := s.pathRelation(w); in || segmentRe.MatchString(w.text) {
+		if in, _ := s.pathRelation(w); in || s.namesDataDir(w) {
 			s.reasons.add(reasonDataDir)
-		}
-	}
-	if idx < 0 {
-		return
-	}
-	ops, skipsHidden := recursiveReader(base(cmd.words[idx].text), cmd.words[idx+1:], data, idx+1, cmd.next)
-	for _, op := range ops {
-		p, ok := s.expandPat(op.pat)
-		if !ok {
-			continue
-		}
-		for _, alt := range expandBraces(p) {
-			comps := splitPat(alt)
-			for _, d := range s.dirs {
-				if _, above := relation(comps, d); above && (!skipsHidden || !hiddenBetween(comps, d)) {
-					s.reasons.add(reasonParentDir)
-				}
-			}
 		}
 	}
 }

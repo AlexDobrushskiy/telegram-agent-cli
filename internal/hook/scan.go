@@ -2,7 +2,6 @@ package hook
 
 import (
 	"bytes"
-	"errors"
 	"regexp"
 	"strings"
 )
@@ -74,11 +73,6 @@ var noCommand = set("for", "select", "case", "in")
 
 var shells = set("sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish")
 
-var interpreters = set("node", "ruby", "perl", "php", "bun", "deno", "Rscript", "tclsh", "lua", "osascript",
-	"awk", "gawk", "mawk", "nawk")
-
-var pythonRe = regexp.MustCompile(`^python[0-9.]*$`)
-
 // inertConsumers only read a heredoc as data.
 var inertConsumers = set("cat", "tee", "head", "tail", "wc", "sort", "uniq", "git", "gh", "pbcopy",
 	"less", "more", "grep", "jq", "yq", "column", "fold", "fmt", "diff")
@@ -95,27 +89,18 @@ var goValues = set("-C", "-o", "-p", "-asmflags", "-buildmode", "-compiler", "-g
 const maxDepth = 8
 
 type ctx struct {
-	file     bool // inside a script file
-	mentions bool // the file mentions the binary
-	depth    int
+	file  bool // inside a script file
+	depth int
 }
 
 type scanner struct {
 	o       Options
 	reasons reasonSet
-	dirRes  []*regexp.Regexp
-	inert   [][2]int          // heredoc bodies only read as data (blanked for text rules)
-	written map[string]string // files written by those heredocs in this command
-	cond    []string          // reasons that count only if the command mentions the binary
+	written map[string]string // files written by heredocs in this command
 	files   map[string]bool
-	env     map[string]envKind // protected variables
-	dirs    [][]string         // data dirs as path components
-	// content the guard can't see; reported only when decoded or when the
-	// visible command links to the account
-	hiddenRs []hiddenReason
-	// linked: a visible word names a protected settings file or dir
-	linked bool
-	st     pathState
+	dirs    [][]string       // data dirs as path components
+	dirRes  []*regexp.Regexp // data dirs inside a word
+	st      pathState
 	// remote > 0 while scanning a command ssh runs on another host: its paths
 	// name that host's files, so the local filesystem is not consulted
 	remote int
@@ -125,58 +110,23 @@ func newScanner(o Options) *scanner {
 	if o.ReadFile == nil {
 		o.ReadFile = readScript
 	}
-	return &scanner{o: o, dirRes: dirPatterns(o), written: map[string]string{}, files: map[string]bool{}, env: envNames(o),
-		dirs: dataDirComps(o), st: newPathState(o)}
+	return &scanner{o: o, written: map[string]string{}, files: map[string]bool{}, dirs: dataDirComps(o), dirRes: dirPatterns(o), st: newPathState(o)}
 }
 
-// scanTop analyses the command and returns the text the text rules should see.
-func (s *scanner) scanTop(cmd string) string {
+// scanTop analyses a command. One the lexer can't read falls back to
+// matching its visible invocations and TGAC_READONLY assignments as text.
+func (s *scanner) scanTop(cmd string) {
 	lx, err := lex(cmd, 0)
-	if err != nil {
-		if mentionRe.MatchString(cmd) {
-			s.reasons.add("could not parse the shell command")
-		}
-		return cmd
-	}
-	s.script(lx, ctx{})
-	text := blank(cmd, s.inert)
-	s.finish(text)
-	return text
-}
-
-// finish adds the hidden and conditional reasons that apply to text.
-func (s *scanner) finish(text string) {
-	if len(s.hiddenRs) > 0 {
-		related := s.related(text)
-		for _, h := range s.hiddenRs {
-			if h.decoded || related {
-				s.reasons.add(h.reason)
+	if err == nil {
+		var cmds []*command
+		if cmds, err = parse(lx); err == nil {
+			for _, c := range cmds {
+				s.command(c, ctx{})
 			}
+			return
 		}
 	}
-	if mentionRe.MatchString(text) {
-		for _, r := range s.cond {
-			s.reasons.add(r)
-		}
-	}
-}
-
-func blank(s string, ranges [][2]int) string {
-	if len(ranges) == 0 {
-		return s
-	}
-	b := []byte(s)
-	for _, r := range ranges {
-		if r[0] < 0 || r[1] > len(b) || r[0] > r[1] {
-			continue
-		}
-		for i := r[0]; i < r[1]; i++ {
-			if b[i] != '\n' {
-				b[i] = ' '
-			}
-		}
-	}
-	return string(b)
+	s.fallback(cmd)
 }
 
 // abs makes p absolute against the command's current directory.
@@ -188,25 +138,12 @@ func (s *scanner) abs(p string) string {
 	return absPath(p, o)
 }
 
-// condAdd records a reason that only matters when the binary is mentioned.
-func (s *scanner) condAdd(c ctx, r string) {
-	if c.file {
-		if c.mentions {
-			s.reasons.add(r)
-		}
-		return
-	}
-	s.cond = append(s.cond, r)
-}
-
 func (s *scanner) script(lx *lexed, c ctx) {
 	if c.depth > maxDepth {
-		s.condAdd(c, "command nests too deep to check")
 		return
 	}
 	cmds, err := parse(lx)
 	if err != nil {
-		s.condAdd(c, "could not parse the shell command")
 		return
 	}
 	for _, cmd := range cmds {
@@ -219,7 +156,7 @@ func (s *scanner) str(code string, c ctx) {
 	c.depth++
 	lx, err := lex(code, -1)
 	if err != nil {
-		s.condAdd(c, "could not parse the shell command")
+		s.fallback(code)
 		return
 	}
 	s.script(lx, c)
@@ -246,41 +183,18 @@ func (s *scanner) command(cmd *command, c ctx) {
 			}
 		}
 		for _, h := range cmd.heredocs {
-			if h.start >= 0 && (h.quoted || len(h.subs) == 0) {
-				s.inert = append(s.inert, [2]int{h.start, h.end})
-			}
 			for _, t := range targets {
 				s.written[s.abs(t)] = h.body
 			}
 		}
 	}
 	data := s.markData(cmd.words, idx)
-	for i, w := range cmd.words {
-		if !data[i] {
-			s.envText(w.text) // after quote removal: TGAC_READ''ONLY=0, \=, $'…'
-			s.link(w, c)
-		}
-	}
-	for _, w := range append(append([]token{}, cmd.outRedirs...), cmd.inRedirs...) {
-		s.link(w, c)
-	}
+	s.assignments(cmd.words, idx)
 	s.envTargets(cmd.words, idx)
 	s.pathRules(cmd, idx, data)
-	s.settingsWrites(cmd, idx, data)
 	s.argv(cmd.words, cmd, c)
 	s.track(cmd, idx)
 }
-
-// link notes a visible word naming a local protected settings file or dir
-// (~/.claude, ~/.claude/settings.json, cd ~/.claude && … settings.json).
-func (s *scanner) link(w token, c ctx) {
-	if !s.linked && !c.file && s.remote == 0 && settingsWordRe.MatchString(w.text) && s.settingsPath(w, true) {
-		s.linked = true
-	}
-}
-
-// settingsWordRe pre-filters words before settingsPath touches the disk.
-var settingsWordRe = regexp.MustCompile(`(?i)claude|codex|settings|hooks\.json|config\.toml`)
 
 // dataFlags carry message text (commit messages, PR titles and bodies), not code.
 var dataFlags = set("-m", "--message", "--body", "--title")
@@ -293,8 +207,8 @@ var greps = set("grep", "egrep", "fgrep", "rg", "ag", "ack")
 var grepValues = set("-A", "-B", "-C", "-m", "-f", "-g", "-t", "-T", "-d", "-D", "--type", "--glob",
 	"--max-count", "--include", "--exclude", "--context", "--file")
 
-// markData excludes message-text flag values and search patterns from the text
-// rules and returns their indices in words. Words with expansions or
+// markData returns the indices of message-text flag values and search
+// patterns in words: data, not paths. Words with expansions or
 // substitutions stay checked.
 func (s *scanner) markData(words []token, idx int) map[int]bool {
 	data := map[int]bool{}
@@ -307,9 +221,6 @@ func (s *scanner) markData(words []token, idx int) map[int]bool {
 			return
 		}
 		data[i] = true
-		if w.start >= 0 {
-			s.inert = append(s.inert, [2]int{w.start, w.end})
-		}
 	}
 	first := idx + 1
 	prog := base(words[idx].text)
@@ -441,8 +352,7 @@ func (s *scanner) argv(words []token, cmd *command, c ctx) {
 		}
 	}
 	if prog.dynamic || prog.glob && prog.text != "[" && prog.text != "[[" {
-		s.opaque(c, "runs a program named by an expansion", s.subsDecode(prog.subs))
-		return
+		return // a program the guard can't name; the binary's own write gate covers it
 	}
 	name := base(prog.text)
 	args = xargsArgs(words[:idx], args)
@@ -456,7 +366,7 @@ func (s *scanner) argv(words []token, cmd *command, c ctx) {
 	case name == "hyperfine":
 		s.hyperfine(args, c)
 	case name == "tmux":
-		s.tmux(args, cmd, c)
+		s.tmux(args, c)
 	case name == "alias":
 		for _, a := range args {
 			if mentionRe.MatchString(a.text) {
@@ -470,13 +380,6 @@ func (s *scanner) argv(words []token, cmd *command, c ctx) {
 			s.scriptArg(args[0], c)
 		}
 	case name == "eval":
-		for _, a := range args {
-			if len(a.subs) > 0 {
-				s.hidden(reasonBuilt, s.subsDecode(a.subs))
-			} else if a.dynamic {
-				s.opaque(c, reasonBuilt, false) // eval re-parses what the expansion holds
-			}
-		}
 		s.str(joinWords(args), c)
 	case name == "ssh":
 		s.ssh(args, cmd, c)
@@ -501,9 +404,7 @@ func (s *scanner) argv(words []token, cmd *command, c ctx) {
 			}
 		}
 	case name == "go":
-		s.goRun(args, c)
-	case pythonRe.MatchString(name) || interpreters[name]:
-		s.interpreter(name, args, cmd, c)
+		s.goRun(args)
 	case strings.Contains(prog.text, "/"):
 		s.file(prog.text, modeAuto, c)
 	}
@@ -541,73 +442,7 @@ func (s *scanner) shell(args []token, cmd *command, c ctx) {
 		}
 		return
 	}
-	if !cflag {
-		s.terminalStdin("sh", args, cmd, nil)
-	}
-	s.stdinCode(cmd, c, true)
-}
-
-// sshNoShell are ssh options that open no remote shell.
-var sshNoShell = set("-N", "-W", "-O", "-G", "-Q")
-
-// pipedIn analyses what a command reads from the pipe: the literal text of
-// echo/printf, the files or heredoc of cat. Anything else is unseen: ask.
-func (s *scanner) pipedIn(cmd *command, c ctx, run func(string)) {
-	p := cmd.prev
-	if p == nil {
-		return
-	}
-	idx, _ := skipPrefix(p.words)
-	if idx >= 0 && len(p.subs) == 0 {
-		args := p.words[idx+1:]
-		literal := true
-		for _, a := range args {
-			literal = literal && !a.dynamic
-		}
-		switch base(p.words[idx].text) {
-		case "echo", "printf":
-			if literal {
-				for len(args) > 0 && strings.HasPrefix(args[0].text, "-") {
-					args = args[1:]
-				}
-				run(joinWords(args))
-				return
-			}
-		case "cat":
-			if len(p.heredocs) > 0 || len(p.herestrings) > 0 {
-				for _, h := range p.heredocs {
-					run(h.body)
-				}
-				for _, h := range p.herestrings {
-					run(h.text)
-				}
-				return
-			}
-			if literal && len(args) > 0 {
-				for _, a := range args {
-					if s.remote > 0 {
-						continue // a file on the remote host
-					}
-					if b, err := s.o.ReadFile(s.abs(a.text)); err == nil {
-						run(string(b))
-					} else if !errorsIsNotExist(err) {
-						s.hidden("runs piped code the guard can't read", false)
-					} else {
-						s.opaque(c, reasonMissing+" ("+a.text+")", false)
-					}
-				}
-				return
-			}
-		}
-	}
-	s.hidden("runs code from a pipe the guard can't see ("+pipeSource(p)+")", pipeDecodes(p))
-}
-
-func pipeSource(p *command) string {
-	if idx, _ := skipPrefix(p.words); idx >= 0 {
-		return base(p.words[idx].text) + " | …"
-	}
-	return "a pipe"
+	s.stdinShell(cmd, c)
 }
 
 // sshCommand returns where the remote command starts in ssh's args (len(args)
@@ -639,25 +474,19 @@ func (s *scanner) ssh(args []token, cmd *command, c ctx) {
 	defer func() { s.remote-- }()
 	start, host := sshCommand(args)
 	if rest := args[start:]; len(rest) > 0 {
-		for _, a := range rest {
-			if len(a.subs) > 0 {
-				s.hidden(reasonBuilt, s.subsDecode(a.subs))
-			}
-		}
 		s.str(joinWords(rest), c)
 		return
 	}
 	if host {
-		s.terminalStdin("ssh", args, cmd, sshNoShell)
-		s.stdinText(cmd, c, true)
-		// a redirected or piped file is read on this host
+		// a heredoc runs on the remote host; a redirected or piped script is read here
+		s.stdinText(cmd, c)
 		s.remote--
-		s.stdinFiles(cmd, c, true)
+		s.stdinFiles(cmd, c)
 		s.remote++
 	}
 }
 
-func (s *scanner) goRun(args []token, c ctx) {
+func (s *scanner) goRun(args []token) {
 	if len(args) == 0 || args[0].text != "run" {
 		return
 	}
@@ -676,10 +505,6 @@ func (s *scanner) goRun(args []token, c ctx) {
 		pkg = strings.TrimSuffix(pkg, "/")
 		if base(pkg) == BinaryName || (strings.HasPrefix(pkg, ".") && base(absPath(pkg, s.o)) == BinaryName) {
 			s.reasons.add(checkInvocation(args[j+1:], s.o))
-			return
-		}
-		for ; j < len(args) && strings.HasSuffix(args[j].text, ".go"); j++ {
-			s.file(args[j].text, modeText, c)
 		}
 		return
 	}
@@ -690,10 +515,11 @@ type fileMode int
 const (
 	modeAuto fileMode = iota
 	modeShell
-	modeText
 )
 
-// file analyses a script the command runs: shell scripts fully, others by the text rules.
+// file follows a shell script the command runs, from a heredoc written in this
+// command or from disk. Other programs, and scripts that are missing or
+// unreadable, are not checked: the binary's own write gate covers them.
 func (s *scanner) file(p string, mode fileMode, c ctx) {
 	if c.depth > maxDepth {
 		return
@@ -709,36 +535,16 @@ func (s *scanner) file(p string, mode fileMode, c ctx) {
 	}
 	if !ok {
 		b, err := s.o.ReadFile(full)
-		if errors.Is(err, errTooBig) && bytes.IndexByte(b, 0) >= 0 {
-			return // a large compiled program
-		}
-		if err != nil {
-			if !errorsIsNotExist(err) {
-				s.hidden("runs "+base(full)+", which the guard can't read ("+err.Error()+")", false)
-			} else {
-				s.opaque(c, reasonMissing+" ("+p+")", false)
-			}
+		if err != nil || bytes.IndexByte(b[:min(len(b), 8192)], 0) >= 0 {
 			return
-		}
-		if bytes.IndexByte(b[:min(len(b), 8192)], 0) >= 0 {
-			return // a binary
 		}
 		content = string(b)
 	}
-	if mode == modeAuto && isShellScript(full, content) {
-		mode = modeShell
-	}
-	if mode == modeShell {
-		fc := ctx{file: true, mentions: mentionRe.MatchString(content), depth: c.depth + 1}
-		if lx, err := lex(content, -1); err != nil {
-			s.condAdd(fc, "could not parse "+base(full))
-		} else {
-			s.script(lx, fc)
+	if mode == modeShell || isShellScript(full, content) {
+		if lx, err := lex(content, -1); err == nil {
+			s.script(lx, ctx{file: true, depth: c.depth + 1})
 		}
-	} else {
-		s.code(content, c)
 	}
-	s.rawRules(content)
 }
 
 func isShellScript(p, content string) bool {

@@ -62,8 +62,8 @@ All commands, flags, JSON fields and settings are in [docs/reference.md](docs/re
 - **Read-only by default.** The binary blocks every Telegram operation outside its read allowlist
   before it leaves your machine. Sending and account changes need `TGAC_READONLY=0`. Watcher
   replies go through their own gate.
-- **A guard for Claude Code.** The hook asks you before an agent sends, switches read-only off, or
-  touches the session files. It inspects tool calls; it is a second check, not a sandbox.
+- **A guard for Claude Code.** The hook asks you when it can see an agent send, switch read-only
+  off, or touch the session files, and stays quiet otherwise. It is a second check, not a sandbox.
 - **The session file is the boundary.** It gives full access to your account. Run agents you don't
   trust as another OS user.
 

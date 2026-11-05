@@ -35,10 +35,11 @@ type matrixCase struct {
 	} `json:"codex"`
 }
 
-// The e2e r2 tester's whole hook matrix (578 payloads, both hooks). Class N
-// (phase 01 surface) and every case the tester expects blocked get a decision;
-// class D (opaque execution whose text names nothing the guard knows, also
-// silent on main) stays silent: docs/safety.md states that limit.
+// The e2e r2 tester's whole hook matrix (578 payloads, both hooks). Every case
+// the tester expects blocked gets a decision; class D and the cases marked
+// allow (opaque or code-mode execution: interpreter code, decoded payloads, a
+// tool's code field) stay silent, since the binary's own write gate covers
+// them (docs/safety.md, Limits).
 func TestE2ER2Matrix(t *testing.T) {
 	f, err := os.Open("testdata/e2e-r2/matrix.jsonl")
 	if err != nil {
@@ -73,47 +74,6 @@ func TestE2ER2Matrix(t *testing.T) {
 		}
 	}
 	if err := sc.Err(); err != nil || n != 578 {
-		t.Fatalf("read %d cases: %v", n, err)
-	}
-}
-
-// e2e r3 (row 11): opaque execution (eval or sh -c of an expansion, an
-// expansion as the program, interpreter code from an expansion or decoded at
-// run time, a missing script) whose visible text names a TGAC_ variable, the
-// binary, the data dir or a protected settings file asks/denies, on every
-// payload shape. Without such a name it stays silent (docs/safety.md, Limits).
-// Rows: every round-3 case of the tester's main matrix and follow-up, plus
-// the same references on each shape.
-func TestE2ER3OpaqueVisible(t *testing.T) {
-	f, err := os.Open("testdata/e2e-r3/opaque-visible.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = f.Close() }()
-	o := matrixOptions()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
-	n := 0
-	for sc.Scan() {
-		var c struct{ Group, Case, Stdin, Expected string }
-		if err := json.Unmarshal(sc.Bytes(), &c); err != nil {
-			t.Fatal(err)
-		}
-		n++
-		for _, codex := range []bool{false, true} {
-			want := ""
-			if c.Expected == "block" {
-				want = "ask"
-				if codex {
-					want = "deny"
-				}
-			}
-			if got := hookCall(t, codex, o, c.Stdin); got != want {
-				t.Errorf("%s %s codex=%v: %q, want %q\n%s", c.Group, c.Case, codex, got, want, c.Stdin)
-			}
-		}
-	}
-	if err := sc.Err(); err != nil || n != 940 {
 		t.Fatalf("read %d cases: %v", n, err)
 	}
 }

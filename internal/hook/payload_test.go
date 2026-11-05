@@ -65,10 +65,7 @@ func TestCodexCapturedPayloads(t *testing.T) {
 	if err != nil || len(files) < 8 {
 		t.Fatalf("fixtures: %v %v", files, err)
 	}
-	want := map[string]string{
-		// a bare shell on a tty: Codex's write_stdin types into it unchecked
-		"Bash-zsh.json": "deny",
-	}
+	want := map[string]string{}
 	for _, f := range files {
 		raw, err := os.ReadFile(f)
 		if err != nil {
@@ -91,8 +88,9 @@ func TestCodexCapturedPayloads(t *testing.T) {
 			bad = map[string]any{"command": "*** Begin Patch\n*** Add File: " + testDir + "/config.json\n+{}\n*** End Patch"}
 			good = map[string]any{"command": "*** Begin Patch\n*** Add File: /work/notes.md\n+run telegram-agent-cli e2e send text\n*** End Patch"}
 		case strings.HasPrefix(in.ToolName, "mcp__"):
-			bad = map[string]any{"code": `const {execSync} = await import("node:child_process"); execSync("` + sendOther + `")`}
-			good = map[string]any{"code": `const {execSync} = await import("node:child_process"); execSync("telegram-agent-cli chats list")`}
+			// code is not read; a command field nested in the arguments is
+			bad = map[string]any{"code": "x", "steps": []any{map[string]any{"command": sendOther}}}
+			good = map[string]any{"code": `const {execSync} = await import("node:child_process"); execSync("` + sendOther + `")`}
 		default:
 			t.Fatalf("%s: unexpected tool %q", name, in.ToolName)
 		}
@@ -217,48 +215,25 @@ func TestUnreadablePayloadsFailClosed(t *testing.T) {
 	}
 }
 
-// Code a tool runs (node_repl, a browser's run-code tool) gets the interpreter
-// code checks on both hooks. Codex also denies any other tool input that names
-// the binary or its variables: it can't tell what the tool does with them.
+// Code a tool runs (node_repl, a browser's run-code tool) is not read: the
+// binary's own write gate covers it. A TGAC_READONLY env key that turns
+// read-only off asks; naming the binary in a data field is data.
 func TestCodeAndUnknownTools(t *testing.T) {
 	o := e2eOptions()
-	both := map[string]string{
-		`execSync("telegram-agent-cli send text --chat 1 --message hi")`:                              "send text",
-		`spawnSync("telegram-agent-cli", ["auth", "logout"])`:                                         "can't resolve",
-		`execSync("telegram-agent-cli e2e send text x", {env: {...process.env, TGAC_READONLY: "0"}})`: "TGAC_READONLY",
-		`const b = "telegram-agent-cli"; execSync(b + " send text --chat 1")`:                         "can't resolve",
-		`fs.writeFileSync(process.env.HOME + "/.codex/hooks.json", "{}")`:                             "Codex hook config",
-		`fs.readFileSync("` + testDir + `/session.json")`:                                             "data dir",
-	}
-	for code, want := range both {
-		for _, tool := range []string{"mcp__node_repl__js", "mcp__pw-lane__browser_run_code_unsafe"} {
-			for _, codex := range []bool{false, true} {
-				deny := map[bool]string{false: "ask", true: "deny"}[codex]
-				p := payload(tool, map[string]any{"code": code, "title": "t"})
-				if got := hookCall(t, codex, o, p); got != deny {
-					t.Errorf("%s codex=%v %q: %q, want %s (%s)", tool, codex, code, got, deny, want)
-				}
-			}
-		}
-		var in Input
-		_ = json.Unmarshal([]byte(payload("mcp__node_repl__js", map[string]any{"code": code})), &in)
-		if r := EvaluateCodex(in, o); !strings.Contains(r, want) {
-			t.Errorf("%q: reason %q, want %q", code, r, want)
-		}
-	}
-	for _, code := range []string{`1+1`, `execSync("telegram-agent-cli chats list")`, `execSync("` + sendOK + `")`} {
+	for _, code := range []string{`1+1`, `execSync("telegram-agent-cli chats list")`, `execSync("` + sendOK + `")`,
+		`execSync("` + sendOther + `")`, `fs.readFileSync("` + testDir + `/session.json")`} {
 		for _, codex := range []bool{false, true} {
 			if got := hookCall(t, codex, o, payload("mcp__node_repl__js", map[string]any{"code": code})); got != "" {
 				t.Errorf("codex=%v %q: %q, want no decision", codex, code, got)
 			}
 		}
 	}
-	// setting a TGAC_ variable anywhere asks; naming the binary in a data field
-	// of a parseable payload (a search query, a path) is data
 	for p, want := range map[string]bool{
-		payload("mcp__x__y", map[string]any{"steps": []any{map[string]any{"run": "TGAC_READONLY=0 x"}}}): true,
-		payload("mcp__x__y", map[string]any{"env": map[string]any{"TGAC_READONLY": "0"}}):                true,
-		payload("mcp__x__y", map[string]any{"q": "telegram-agent-cli send text --chat 1"}):               false,
+		payload("mcp__x__y", map[string]any{"steps": []any{map[string]any{"command": "TGAC_READONLY=0 x"}}}): true,
+		payload("mcp__x__y", map[string]any{"env": map[string]any{"TGAC_READONLY": "0"}}):                    true,
+		payload("mcp__x__y", map[string]any{"env": map[string]any{"TGAC_READONLY": "1"}}):                    false,
+		payload("mcp__x__y", map[string]any{"steps": []any{map[string]any{"run": "TGAC_READONLY=0 x"}}}):     false,
+		payload("mcp__x__y", map[string]any{"q": "telegram-agent-cli send text --chat 1"}):                   false,
 	} {
 		deny, ask := map[bool]string{true: "deny"}[want], map[bool]string{true: "ask"}[want]
 		if got := hookCall(t, true, o, p); got != deny {
@@ -280,57 +255,41 @@ func TestCodeAndUnknownTools(t *testing.T) {
 	}
 }
 
-// Codex's write_stdin sends no PreToolUse, so a shell or REPL started on a tty
-// would run whatever is typed into it unchecked: Codex denies starting one.
-// Claude's Bash has no terminal stdin, so there it stays allowed.
+// A shell or REPL started on the terminal passes on Codex too: what is typed
+// into it later is not seen, and the binary's own write gate covers it.
 func TestCodexTerminalStdin(t *testing.T) {
 	o := e2eOptions()
-	deny := []string{
-		"zsh -f", "bash", "bash -i", "sh -s", "bash -", "env zsh", "exec bash -l", "python3", "python3 -i", "node",
-		"ruby", "ssh black-lan", "ssh -t black-lan", "cd /tmp && bash", "osascript",
-		"tmux", "tmux new -s x", "tmux attach -t x", "tmux a",
-	}
-	for _, c := range deny {
-		if got := hookCall(t, true, o, payload("Bash", map[string]any{"command": c})); got != "deny" {
-			t.Errorf("codex %q: %q, want deny", c, got)
-		}
-		if got := hookCall(t, false, o, payload("Bash", map[string]any{"command": c})); got != "" {
-			t.Errorf("claude %q: %q, want no decision", c, got)
-		}
-	}
 	pass := []string{
+		"zsh -f", "bash", "bash -i", "sh -s", "bash -", "env zsh", "exec bash -l", "python3", "python3 -i",
+		"node", "ruby", "osascript", "ssh box", "ssh -t box", "cd /tmp && bash",
+		"tmux", "tmux new -s x", "tmux attach -t x", "tmux a",
 		"bash --version", "node --version", "node -v", "python3 -V", "python3 --help", "zsh -c 'echo hi'",
 		"echo 'echo hi' | bash", "bash <<<'echo hi'", "python3 -m http.server", "python3 -c 'print(1)'",
 		"ssh black-lan uptime", "ssh -N -L 8080:localhost:80 black-lan", "cat", "bash < /work/scripts/ok.sh",
 		"tmux new -d -s x", "tmux new-session -ds x", "tmux new -s x htop", "tmux ls", "tmux kill-server",
 	}
 	for _, c := range pass {
-		if got := hookCall(t, true, o, payload("Bash", map[string]any{"command": c})); got != "" {
-			t.Errorf("codex %q: %q, want no decision", c, got)
+		for _, codex := range []bool{false, true} {
+			if got := hookCall(t, codex, o, payload("Bash", map[string]any{"command": c})); got != "" {
+				t.Errorf("codex=%v %q: %q, want no decision", codex, c, got)
+			}
 		}
 	}
 }
 
-// A shell or interpreter reading its code through "<" runs that file: the
-// guard reads it like a script argument.
+// A shell reading its code through "<" runs that file: the guard reads it like
+// a script argument. An interpreter's code, or a script named by an
+// expansion, is not read.
 func TestStdinRedirectScript(t *testing.T) {
 	o := e2eOptions()
 	for c, want := range map[string]string{
 		"bash < scripts/bad.sh":           "send text",
 		"sh </work/scripts/bad.sh":        "send text",
 		"zsh -s < scripts/bad":            "auth logout",
-		"bash < $SCRIPT":                  "",
-		"python3 < scripts/bad.py":        "send text",
 		"ssh black-lan < scripts/bad":     "auth logout",
 		"cat scripts/bad | ssh black-lan": "auth logout",
 	} {
 		r := strings.Join(CheckBash(c+" && telegram-agent-cli me", o), "; ")
-		if want == "" {
-			if r == "" {
-				t.Errorf("%q: allowed, want ask", c)
-			}
-			continue
-		}
 		if !strings.Contains(r, want) {
 			t.Errorf("%q: %q, want %q", c, r, want)
 		}
@@ -338,8 +297,10 @@ func TestStdinRedirectScript(t *testing.T) {
 			t.Errorf("%q alone: %q, want %q", c, r, want)
 		}
 	}
-	if r := CheckBash("bash < scripts/ok.sh", o); len(r) != 0 {
-		t.Errorf("harmless script on stdin: %v", r)
+	for _, c := range []string{"bash < scripts/ok.sh", "bash < $SCRIPT", "python3 < scripts/bad.py"} {
+		if r := CheckBash(c, o); len(r) != 0 {
+			t.Errorf("%q: %v, want pass", c, r)
+		}
 	}
 }
 
@@ -373,7 +334,7 @@ func TestEveryFieldDecided(t *testing.T) {
 		payload("mcp__telegram__send_message", map[string]any{"chat_id": "@my_test_bot", "text": "x"}),
 		payload("call_tool", map[string]any{"server": "telegram", "name": "send_message", "arguments": map[string]any{}}),
 		// file tools of MCP servers and others write where their path says
-		payload("mcp__filesystem__write_file", map[string]any{"path": testHome + "/.claude/settings.json", "content": "{}"}),
+		payload("mcp__filesystem__write_file", map[string]any{"path": testDir + "/config.json", "content": "{}"}),
 		raw(map[string]any{"tool_name": "mcp__fs__move_file", "cwd": testDir,
 			"tool_input": map[string]any{"source": "/tmp/x", "destination": "config.json"}}),
 		payload("apply_patch", map[string]any{"input": "*** Begin Patch\n*** Add File: " + testDir + "/peers.json\n+{}\n*** End Patch"}),
@@ -381,7 +342,6 @@ func TestEveryFieldDecided(t *testing.T) {
 		payload("functions.exec", map[string]any{}),
 		payload("mcp__terminal__execute", nil),
 		payload("mcp__x__y", 42),
-		payload("mcp__x__y", map[string]any{"code": []any{"x"}}),
 		// nested and JSON-encoded strings are read too
 		payload("multi_tool_use.parallel", map[string]any{"tool_uses": []any{map[string]any{"parameters": jsonStr(map[string]any{"cmd": sendOther})}}}),
 		payload("write_stdin", map[string]any{"session_id": 1, "chars": "TGAC_READONLY=0 x\n"}),

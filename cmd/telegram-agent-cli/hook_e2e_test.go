@@ -98,7 +98,7 @@ func TestHookEndToEnd(t *testing.T) {
 		{"Read|Edit|Write|MultiEdit|NotebookEdit|Grep", `{"tool_name":"Read","tool_input":{"file_path":"` + session + `"}}`, true},
 		{"Read|Edit|Write|MultiEdit|NotebookEdit|Grep", `{"tool_name":"Read","tool_input":{"file_path":"/etc/hosts"}}`, false},
 		{"Bash|Monitor", `not json`, true}, // unreadable: fail closed
-		{"mcp__.*|PowerShell", `{"tool_name":"mcp__node_repl__js","tool_input":{"code":"execSync('telegram-agent-cli send text --chat 1')"}}`, true},
+		{"mcp__.*|PowerShell", `{"tool_name":"mcp__node_repl__js","tool_input":{"code":"execSync('telegram-agent-cli send text --chat 1')"}}`, false}, // code is not read
 		{"mcp__.*|PowerShell", `{"tool_name":"mcp__runner__run","tool_input":{"cmd":"telegram-agent-cli send text --chat 1"}}`, true},
 		{"mcp__.*|PowerShell", `{"tool_name":"PowerShell","tool_input":{"command":"telegram-agent-cli send text --chat 1"}}`, true},
 		{"mcp__.*|PowerShell", `{"tool_name":"mcp__pw-lane__browser_navigate","tool_input":{"url":"https://example.com"}}`, false},
