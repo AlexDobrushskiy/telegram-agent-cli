@@ -64,8 +64,7 @@ func TestE2EGuard(t *testing.T) {
 		"echo '{}' > ~/.config/telegram-agent-cli/config.json":          "data dir",
 		"sed -i s/x/y/ /xhome/u/.config/telegram-agent-cli/config.json": "data dir",
 		// an e2e send from another data dir (its own allow-list) or with writes switched on
-		"TGAC_HOME=/tmp/fake telegram-agent-cli e2e send text hi": "TGAC_HOME",
-		"TGAC_READONLY=0 telegram-agent-cli e2e send text hi":     "TGAC_READONLY",
+		"TGAC_READONLY=0 telegram-agent-cli e2e send text hi": "TGAC_READONLY",
 		// the ordinary send path is unchanged
 		"telegram-agent-cli send text --chat @my_test_bot --message hi": "send text",
 	}
@@ -140,8 +139,8 @@ func TestE2EGuardPaths(t *testing.T) {
 	}
 }
 
-// Codex-only tools: a patch touching the data dir or a hook config is denied;
-// ordinary patches, even ones mentioning the binary, pass.
+// Codex-only tools: a patch touching the data dir is denied; ordinary patches,
+// even ones mentioning the binary, and agent config files pass.
 func TestCodexOtherTools(t *testing.T) {
 	o := testOptions()
 	patch := func(body string) Input {
@@ -150,9 +149,6 @@ func TestCodexOtherTools(t *testing.T) {
 	deny := []Input{
 		patch("*** Begin Patch\n*** Update File: " + testDir + "/config.json\n+x\n*** End Patch"),
 		patch("*** Begin Patch\n*** Update File: ~/.config/telegram-agent-cli/config.json\n*** End Patch"),
-		patch("*** Begin Patch\n*** Update File: /xhome/u/.codex/hooks.json\n*** End Patch"),
-		patch("*** Begin Patch\n*** Update File: .codex/config.toml\n*** End Patch"),
-		patch("*** Begin Patch\n*** Update File: /xhome/u/.claude/settings.json\n*** End Patch"),
 	}
 	for _, in := range deny {
 		if EvaluateCodex(in, o) == "" {
@@ -161,6 +157,8 @@ func TestCodexOtherTools(t *testing.T) {
 	}
 	pass := []Input{
 		patch("*** Begin Patch\n*** Update File: docs/reference.md\n+run telegram-agent-cli e2e send text\n*** End Patch"),
+		patch("*** Begin Patch\n*** Update File: /xhome/u/.codex/hooks.json\n*** End Patch"),
+		patch("*** Begin Patch\n*** Update File: /xhome/u/.claude/settings.json\n*** End Patch"),
 		{ToolName: "mcp__x__y", ToolInput: map[string]any{"q": "hello"}},
 	}
 	for _, in := range pass {
@@ -168,27 +166,12 @@ func TestCodexOtherTools(t *testing.T) {
 			t.Errorf("EvaluateCodex(%v) = %q, want pass", in.ToolInput, r)
 		}
 	}
-	// Writing a Codex hook config through Bash or the file tools asks (and so is denied on Codex).
-	if len(CheckBash("echo '{}' > /xhome/u/.codex/hooks.json", o)) == 0 {
-		t.Error("Bash write to ~/.codex/hooks.json allowed")
-	}
-	if CheckContent("Write", map[string]any{"file_path": "/work/.codex/config.toml", "content": "x = 1\n"}, o) == "" {
-		t.Error("Write of .codex/config.toml allowed")
-	}
-	if len(CheckBash("cat /xhome/u/.codex/hooks.json", o)) != 0 {
-		t.Error("reading ~/.codex/hooks.json asked")
-	}
 }
 
-// Review r1: holes in the e2e/Codex additions.
+// Review r1: holes in the e2e additions.
 func TestE2EGuardReviewHoles(t *testing.T) {
 	o := e2eOptions()
-	o.CodexHome = "/work/codex-home"
 	ask := []string{
-		// interpreter code writing a Codex hook config
-		`python3 -c 'open("/xhome/u/.codex/hooks.json", "w").write("{}")'`,
-		`node -e 'require("fs").writeFileSync(process.env.HOME + "/.codex/config.toml", "")'`,
-		`python3 -c 'open("/work/codex-home/hooks.json", "w").write("{}")'`,
 		// e2e's bool flags are unknown to the root command: there cobra takes the
 		// next word as their value, so "me" is not the command
 		"telegram-agent-cli --all me e2e send text --chat @other_bot",
@@ -202,15 +185,5 @@ func TestE2EGuardReviewHoles(t *testing.T) {
 		if len(CheckBash(c, o)) == 0 {
 			t.Errorf("CheckBash(%q) allowed, want ask", c)
 		}
-	}
-	patch := Input{ToolName: "apply_patch", ToolInput: map[string]any{
-		"input": "*** Begin Patch\n*** Update File: /work/codex-home/hooks.json\n*** End Patch"}}
-	if EvaluateCodex(patch, o) == "" {
-		t.Error("apply_patch of $CODEX_HOME/hooks.json passed")
-	}
-	rel := Input{ToolName: "apply_patch", Cwd: "/work", ToolInput: map[string]any{
-		"input": "*** Begin Patch\n*** Update File: codex-home/config.toml\n*** End Patch"}}
-	if EvaluateCodex(rel, o) == "" {
-		t.Error("apply_patch of $CODEX_HOME/config.toml by a relative path passed")
 	}
 }

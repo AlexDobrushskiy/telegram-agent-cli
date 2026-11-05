@@ -13,70 +13,40 @@ Five layers, each independent:
    mode `send`, every `auth` command but `status`, and `hook install|uninstall` refuse before
    touching Telegram, the data dir or the settings file. A command is a write unless it is on the
    binary's read list, so a new or renamed one cannot slip through. This is the main barrier; the
-   hook's jobs are catching the `TGAC_READONLY` override, protecting the data dir and the Claude Code
-   settings, and flagging calls off the read list.
+   hook's jobs are catching a visible `TGAC_READONLY` override, protecting the data dir, and flagging
+   calls off the read list.
 2. **Read-only default in the agent's environment.** `hook install` sets `TGAC_READONLY=1` in Claude
    Code's settings, so a write needs an explicit override in the command itself.
 3. **The PreToolUse hook.** Before Claude Code runs a tool, `telegram-agent-cli hook claude-pretooluse`
    inspects it (Bash, and Monitor's background commands, the same way) and forces a permission
-   prompt ("ask") when the call:
-   - runs `telegram-agent-cli` with a subcommand off the read list (`send`, `auth` other than `status`,
-     `hook install`, unknown ones), including through `sudo`, `env` (also `-S`/`--split-string`),
-     `timeout`, `script`, `busybox`, `sh -c`, `bash -lc`, `eval`, `ssh host [--] …`, `watch`, `tmux`,
-     `hyperfine`, `find -exec`, shell functions, `$(…)`, pipes, heredocs fed to a shell, shell scripts it
-     can read, or `go run …/cmd/telegram-agent-cli`. `xargs` without `-I` and GNU `parallel` append
-     their input, so the fixed part must already be a full read command (`xargs telegram-agent-cli
-     messages show --chat 1 --id` passes, `xargs telegram-agent-cli` asks);
-   - runs it from interpreter code (`python -c`, `node -e`, `ruby`/`perl -e`, `php -r`, `awk`,
-     `osascript`, heredocs, script files): string literals after the name are its argv
-     (`['telegram-agent-cli', 'auth', 'logout']`), a literal holding a whole command line is parsed
-     as shell, and a call the hook can't resolve (a variable, concatenation, `%`-format) asks;
-   - runs content it can't see (a pipe into a shell or interpreter from anything but literal
-     `echo`/`printf`/`cat`, `bash <(…)`, `source <(…)`, `sh -c "$(…)"`, `eval "$(…)"`, a script named
-     by a variable, a script that isn't a readable regular file) when that content is decoded on the
-     way in (`base64 -d`, `xxd -r`, `openssl enc -d`, `uudecode`, `rev`, `tr`), or when the visible
-     command also names the binary, a `TGAC_` variable, the watcher variable, the data dir or an
-     MTProto library. Otherwise `curl … | bash`, `eval "$(ssh-agent -s)"` and `bash "$SCRIPT"` pass,
-     since the hook runs on every Bash call, not only Telegram ones;
-   - sets `TGAC_READONLY` to a false, empty or computed value in any form: `export
-     TGAC_READ''ONLY=0`, `read`/`printf -v`/`for`/`declare -n`, `${TGAC_READONLY:=0}`, or code such as
-     `os.environ['TGAC_READONLY'] = str(0)` and `$ENV{TGAC_READONLY}=0` (only a plain literal that
-     stays read-only, such as `'1'`, passes); also a `TGAC_` name built from parts;
-   - sets or exports the watcher session variable (`TGAC_WATCHER_SESSION`, or `watcher_session_env`
-     from the data dir's `config.json`);
-   - sets or reads `TGAC_HOME` (`TGAC_HOME=…`, `$TGAC_HOME`, `os.environ['TGAC_HOME']`); a bare
-     mention is fine;
-   - references a data dir: `$TGAC_HOME` and the default `~/.config/telegram-agent-cli`. Each word is
-     normalised first (quote removal, `~`, `$HOME`, `${HOME}`, `$XDG_CONFIG_HOME`, variables set
-     earlier in the command, the cwd and `cd`, `.`/`..`/`//`, globs and braces, symlinks) and
-     compared case-insensitively; a longer name such as `telegram-agent-cli-notes.md` is not the dir.
-     A `telegram-agent-cli/` segment followed by a data-dir file name (`config.json`, `session.json`,
-     `peers.json`, `pending-login.json`, `watchers.json`, `answered.jsonl`, `PAUSE-ALL`) counts
-     whatever comes before it;
-   - reads a directory tree that contains a data dir: `grep -r`, `rg` (with `--hidden`, or a path
-     inside `.config`), `find … -exec`/`-delete` or piped to `xargs`, `tar`, `zip`, `cp -r`, `rsync`
-     and similar on `~`, `~/.config` or `/`;
-   - changes Claude Code settings: `settings.json`/`settings.local.json` in any `.claude` dir or
-     `$CLAUDE_CONFIG_DIR`, and `managed-settings.json`. File tools ask when the text they write or
-     replace names `hooks`, `PreToolUse`, `disableAllHooks`, a `TGAC_` variable or the binary, or when
-     the `hooks`/`env` part of the file would change. Bash asks only when a settings file is the
-     target of a write: a redirect, `tee`, `mv`/`rm` (also of a `.claude` dir), the destination of
-     `cp`/`ln`/`rsync`, `sed -i`/`perl -i`, `dd of=`, `git checkout`/`restore`. Reading or
-     mentioning it passes, and code asks only when it names a settings file and also writes a file;
-   - mixes an MTProto library (Telethon, gotd, Pyrogram…) with a session file;
-   - uses Read on `config.json`, `session.json`, `peers.json` or `pending-login.json` in the data dir,
-     Grep on the data dir or on a directory that contains it (`~`, `~/.config`, `/`, or no path while
-     the cwd is one of those), or Edit/Write/MultiEdit/NotebookEdit anywhere under it;
-   - writes code (any string field of Write/Edit/MultiEdit/NotebookEdit, not the replaced text) that
-     overrides `TGAC_READONLY`, sets the watcher variable, touches the data dir, writes Claude Code
-     settings, or pairs an MTProto library with a session. Documentation files (`.md`, `.txt`,
-     `.rst`…) are not scanned, so `go test` or `make` can't run unchecked code that was written
-     silently.
+   prompt ("ask") only for what it can see the call do:
+   - run `telegram-agent-cli` with a subcommand off the read list (`send`, `auth` other than `status`,
+     `hook install`, unknown ones, or one that comes from an expansion), including through `sudo`,
+     `env`, `timeout`, `sh -c`, `bash -lc`, `eval`, `ssh host …`, `watch`, `tmux`, `hyperfine`,
+     `find -exec`, `xargs`, `$(…)`, pipes and heredocs fed to a shell, shell scripts it can read, a
+     program named by a variable set earlier in the command (`B=./bin/telegram-agent-cli; $B send`),
+     or `go run …/cmd/telegram-agent-cli`; an `e2e` write whose `--chat` is not an allow-list entry;
+   - set `TGAC_READONLY` to a value that turns read-only off (`0`, `false`, `no`, `off`) or that it
+     can't read (`TGAC_READONLY=$X`): as a command prefix, through `env`, `export`/`declare`, `read`,
+     `printf -v` or `for`. An empty value keeps read-only on and passes;
+   - name a path in a data dir (`$TGAC_HOME` and the default `~/.config/telegram-agent-cli`) as a
+     word, a redirect target, or inside a word (`curl -F f=@…/session.json`). Words are normalised
+     first (quotes, `~`, `$HOME`, `$XDG_CONFIG_HOME`, variables set earlier, the cwd and `cd`, globs,
+     symlinks); a longer name such as `telegram-agent-cli-notes.md` is not the dir;
+   - use Read on `config.json`, `session.json`, `peers.json` or `pending-login.json` in the data dir,
+     Grep on it or on a directory that contains it, or Edit/Write/MultiEdit/NotebookEdit under it;
+   - call a Telegram tool (an MCP server named `telegram`/`tgac`) other than a read.
 
-   The name inside an argument does not count: `git commit -m "…telegram-agent-cli send…"`,
-   `grep telegram-agent-cli README.md` or a `claude -p "…"` prompt pass silently. Values of
-   `-m`/`--message`/`--body`/`--title` and grep/rg/`git grep` patterns are treated as text, unless
-   they contain an expansion such as `$(…)`.
+   Everything else passes, on purpose: interpreter code (`python3 -c`, `node -e`, heredocs fed to an
+   interpreter), a program or script named by an expansion, a script that doesn't exist yet,
+   decoded or downloaded payloads, recursive reads of `~`, and Claude Code or Codex settings files.
+   The hook used to ask about those too; in practice almost every such prompt was a false alarm
+   (95% over a week of real agent sessions), and agents started approving prompts automatically.
+   A prompt that fires on everything protects nothing, so the hook now asks only when the risk is
+   visible, and the binary's write gate covers the rest.
+
+   The name inside an argument or heredoc does not count: `git commit -m "…telegram-agent-cli send…"`,
+   `grep telegram-agent-cli README.md`, a `claude -p "…"` prompt or a heredoc written to a file pass.
 
    How Claude Code handles "ask" (verified 2026-10-28 on Claude Code 2.1.307): interactive sessions
    show the permission prompt in every mode, including `bypassPermissions`; in headless `claude -p`
@@ -89,27 +59,10 @@ Five layers, each independent:
 
 - Code running as your OS user can read the session file. The hook only sees the tool call, not
   what a program does once it runs.
-- Interpreter code is followed through string literals, not executed: code that computes the
-  command, builds a variable name in a way the hook can't read, or decodes its own payload can get
-  past it. An agent can also write its own MTProto client.
-- Programs that run other files on their own (`make`, `go test`, `npm run`) are not followed; their
-  files are checked when an agent writes them with the file tools or a heredoc, not when they run.
-- Content the hook can't see is opaque: a download piped into a shell, `$(…)` run as code, `eval`
-  or `sh -c` of an expansion, an expansion as the program (`"$BIN" …`), interpreter code from an
-  expansion (`python3 -c "$CODE"`) or that `exec`s/`eval`s something other than a literal, a script
-  it can't read or that doesn't exist yet. Opaque execution asks when it is decoded on the way in, or
-  when the visible text of the call names `telegram-agent-cli`, a `TGAC_` variable, the data dir or
-  a protected settings file (a Claude settings file, the `.claude` dir, a Codex `hooks.json` /
-  `config.toml`): `eval "$TGAC_COMMAND"`, `bash -c "$CMD" ~/.claude/settings.json`,
-  `TGAC_READONLY=0 bash /tmp/x.sh`. A script that ssh runs on another host is not read and not
-  opaque here.
-- **Opaque or encoded execution with no such name passes.** When the visible text never names one
-  of those, the hook has nothing to decide on and stays silent. Examples: `eval "$CMD"`,
-  `bash -c "$CMD"`, `"$BIN" e2e send …`, `python3 -c 'import base64; exec(base64.b64decode("…"))'`,
-  `bash /tmp/x.sh` or `python3 x.py` for a script that doesn't exist yet, an unknown tool running
-  opaque code. Each of these can send from the account if the session file is readable and
-  `TGAC_READONLY` is off; the binary's own write gate is the main barrier. Encoded payloads are not
-  decoded, except a shell decode feeding a shell (`eval "$(… | base64 -d)"`), which asks.
+- Anything the hook can't see passes: interpreter code, `eval "$CMD"`, `"$BIN" send …`, a script
+  written by one call and run by the next, `make`/`go test`/`npm run`, a hand-written MTProto client.
+  Each of these can send from the account if the session file is readable and `TGAC_READONLY` is
+  turned off inside that code; the binary's own write gate is the main barrier.
 - The prompt is a question to you, not your approval. In `bypassPermissions` mode it is the only
   thing between the agent and the command, so read each one before approving.
 
@@ -154,15 +107,11 @@ a patch as `{"tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch�
 as `mcp__<server>__<tool>` with its JSON arguments, or the raw argument string when they don't
 parse. `write_stdin` (typing into a running command) and code mode's `wait` send no `PreToolUse`.
 The Codex hook makes the same decisions as the Claude Code hook ([what a payload is checked
-for](#what-the-hook-reads-in-a-payload)), as `deny`. It also denies a shell, REPL, `ssh HOST` or
-`tmux` session started on the terminal (`zsh`, `bash -i`, `python3`, `node`, `tmux new`), since what
-is typed into it later is never checked. Pipes, heredocs, `<` redirects, `-c`, scripts, `--version`
-and `ssh -N` pass.
+for](#what-the-hook-reads-in-a-payload)), as `deny`. A shell or REPL started on the terminal passes:
+what is typed into it later is not seen, like any other opaque execution.
 
-Codex hook configs (`hooks.json` and `config.toml` in any `.codex` dir and in `$CODEX_HOME`) are
-protected like Claude Code settings, including from interpreter code (`python3 -c 'open(...)'`)
-that writes them. Add the hook to `~/.codex/hooks.json` with matcher `.*` (it must see every tool),
-then approve it with `/hooks`:
+Add the hook to `~/.codex/hooks.json` with matcher `.*` (it must see every tool), then approve it
+with `/hooks`:
 
 ```json
 {"hooks": {"PreToolUse": [{"matcher": ".*", "hooks": [
@@ -200,34 +149,25 @@ or nothing; it always exits 0. `hook claude-pretooluse --help` prints its own he
 
 ## What the hook reads in a payload
 
-Both hooks (Claude Code: ask, Codex: deny) decide on every string a payload carries:
+Both hooks (Claude Code: ask, Codex: deny) read a payload by the role of each field:
 
 - **Shell tools** (`Bash`, `PowerShell`, `exec_command`, `shell`, `local_shell`, `container.exec`,
   `shell_command`…, with or without `functions.`): the Bash checks on each `command` and `cmd`
   field (both are read when both are present), string or argv array. `workdir` is the cwd for
-  relative paths. A command that only reads or prints passes, as before.
-- **File tools** (`Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Grep`): path and content
-  checks. A file tool without a path is unreadable.
+  relative paths.
+- **File tools** (`Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Grep`): the path only;
+  content is data.
 - **`apply_patch`**: the files a patch adds, updates, deletes or moves to, resolved against the cwd.
-- **Any other tool** (MCP, unknown names): `command`/`cmd` get the Bash checks, `code`/`script`
-  the interpreter-code checks. Every string, nested or JSON-encoded, is read by its role: a nested
-  object with a `command`/`cmd`/`code`/`script` field (parallel tool uses, a dispatch) gets the same
-  checks; terminal input (`write_stdin`'s `chars`) gets the Bash checks; setting a `TGAC_` variable
-  (`TGAC_READONLY=0`, or one as an env key) asks; naming the data dir, a Claude settings file or a
-  Codex hook config, or a path field (`path`, `file_path`, `destination`…) inside one, asks. Other
-  text is data: a search query or a path that mentions `telegram-agent-cli` passes. A Telegram tool
-  (`telegram` or `tgac` in its name, or a dispatch naming such a server) asks unless its name starts
-  with a read verb (`get_`, `list_`, `search_`…); the only unprompted write path is
-  `telegram-agent-cli e2e`. A tool named as a runner (`exec`, `shell`, `bash`, `eval`, `repl`,
-  `command`…) without a readable command or code field asks.
-- **Fields beside `tool_input`** are call metadata (`session_id`, `scratchpad_dir`, `cwd`…) and are
-  not read. A payload carrying the input in another envelope (`arguments`, `input`, `parameters`…)
-  is a shape the guard can't read.
-- **Fail closed.** A payload that isn't one JSON object, has no tool name, carries such an envelope,
-  or whose `tool_input` is a number, an array or JSON-looking text that isn't one object asks. So
-  does a shell tool without a string or argv command, a command or code field of another type, and
-  a call the guard fails to check in time. A `tool_input` that is a JSON string holding an object is
-  read as that object; any other string is read as a command or code (Codex sends MCP arguments it
-  can't parse that way), and asks when it names the binary or a `TGAC_` variable.
+- **Any other tool** (MCP, unknown names): `command`/`cmd` get the Bash checks, at any depth (parallel
+  tool uses, a dispatch, JSON-encoded strings); terminal input (`write_stdin`'s `chars`) gets the
+  Bash checks; a `TGAC_READONLY` env key that turns read-only off asks; a path field (`path`,
+  `file_path`, `destination`…) or patch line inside the data dir asks. A Telegram tool (`telegram` or
+  `tgac` in its name, or a dispatch naming such a server) asks unless its name starts with a read
+  verb (`get_`, `list_`, `search_`…). `code`/`script` fields are not read. Other text is data.
+- **Fail closed on malformed payloads.** A payload that isn't one JSON object, has no tool name,
+  carries its input in another envelope (`arguments`, `input`, `parameters`…), or whose
+  `tool_input` is not an object asks; so does a shell tool without a string or argv command, a
+  runner-named tool (`exec`, `shell`, `eval`…) with neither a command nor code, and a call the
+  guard fails to check in time.
 
-What stays silent: calls whose text names nothing above (see **Limits**, opaque execution).
+Everything else stays silent (see **Limits**).

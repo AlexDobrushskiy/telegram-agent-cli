@@ -9,52 +9,12 @@ import (
 	"github.com/AlexDobrushskiy/telegram-agent-cli/internal/config"
 )
 
-// Protected environment variables: TGAC_READONLY (only a non-read-only value
-// matters), TGAC_HOME (any assignment or expansion) and the watcher session
-// variables (any assignment or export).
+// The one protected variable is TGAC_READONLY: setting it to a value that
+// turns read-only off is what lets the binary write. Only real assignments
+// count (NAME=v before a command, env, export/declare, read/printf -v, for);
+// the name inside data or code text is not an assignment.
 
-type envKind int
-
-const (
-	envReadOnly envKind = iota
-	envHome
-	envWatcher
-)
-
-var (
-	reasonReadOnly = "sets " + config.EnvReadOnly + " to a non-read-only value"
-	reasonHome     = "sets or reads " + config.EnvHome
-	reasonPartial  = "builds a TGAC_ variable name from parts"
-)
-
-func reasonEnv(k envKind, name string) string {
-	switch k {
-	case envReadOnly:
-		return reasonReadOnly
-	case envHome:
-		return reasonHome
-	}
-	return "sets the watcher session variable " + name
-}
-
-// WatcherEnvsFor returns the watcher session variable names: the default plus
-// watcher_session_env from each data dir's config.json.
-func WatcherEnvsFor(dirs []string) []string {
-	names := []string{config.DefaultWatcherSessionEnv}
-	for _, d := range dirs {
-		b, err := readScript(filepath.Join(d, "config.json"))
-		if err != nil {
-			continue
-		}
-		var c struct {
-			Env string `json:"watcher_session_env"`
-		}
-		if json.Unmarshal(b, &c) == nil && isName(c.Env) && !contains1(names, c.Env) {
-			names = append(names, c.Env)
-		}
-	}
-	return names
-}
+var reasonReadOnly = "sets " + config.EnvReadOnly + " to a non-read-only value"
 
 // E2EAllowedFor returns the e2e.allowed_chats entries of each data dir's config.json.
 func E2EAllowedFor(dirs []string) []string {
@@ -76,70 +36,10 @@ func E2EAllowedFor(dirs []string) []string {
 	return out
 }
 
-func contains1(xs []string, x string) bool {
-	for _, y := range xs {
-		if y == x {
-			return true
-		}
-	}
-	return false
-}
-
-func envNames(o Options) map[string]envKind {
-	m := map[string]envKind{config.EnvReadOnly: envReadOnly, config.EnvHome: envHome, config.DefaultWatcherSessionEnv: envWatcher}
-	for _, w := range o.WatcherEnvs {
-		if isName(w) && w != config.EnvReadOnly && w != config.EnvHome {
-			m[w] = envWatcher
-		}
-	}
-	return m
-}
-
-// envValueBad reports whether an assignment to a protected variable needs the owner.
-func envValueBad(k envKind, a assign) bool {
-	if k != envReadOnly {
-		return true
-	}
-	return !a.known || strings.TrimSpace(a.value) == "" || !config.ReadOnlyFrom(a.value)
-}
-
-var tgacPrefixRe = regexp.MustCompile(`TGAC_[A-Za-z0-9_]*`)
-
-// envText finds assignments to protected variables in shell or code text:
-// NAME=v, environ['NAME'] = v, "NAME": v, setenv("NAME", v), $ENV{NAME}=v, ${NAME:=v}.
-func (s *scanner) envText(text string) {
-	for name, kind := range s.env {
-		for i := 0; ; {
-			k := strings.Index(text[i:], name)
-			if k < 0 {
-				break
-			}
-			k += i
-			i = k + len(name)
-			if k > 0 && isNameChar(text[k-1]) || i < len(text) && isNameChar(text[i]) {
-				continue
-			}
-			if kind == envHome && k > 0 && text[k-1] == '$' {
-				s.reasons.add(reasonHome)
-				continue
-			}
-			if a := assignAfter(text, k, i); a.ok && envValueBad(kind, a) {
-				s.reasons.add(reasonEnv(kind, name))
-			}
-		}
-	}
-	// TGAC_ + "READONLY", 'TGAC_%s' % x, "TGAC_${X}": a name the guard cannot read
-	for _, m := range tgacPrefixRe.FindAllStringIndex(text, -1) {
-		if m[1] >= len(text) || strings.IndexByte("'\"+%{$`", text[m[1]]) < 0 {
-			continue
-		}
-		part := text[m[0]:m[1]]
-		for name := range s.env {
-			if len(part) < len(name) && strings.HasPrefix(name, part) {
-				s.reasons.add(reasonPartial)
-			}
-		}
-	}
+// readOnlyOff reports whether an assignment of TGAC_READONLY needs the owner:
+// a value the guard can't read, or one that turns read-only off.
+func readOnlyOff(a assign) bool {
+	return !a.known || !config.ReadOnlyFrom(a.value)
 }
 
 // assign describes what follows a variable name: whether it is assigned and,
@@ -149,145 +49,61 @@ type assign struct {
 	value     string
 }
 
-// assignAfter inspects text after a name at text[k:i].
-func assignAfter(text string, k, i int) assign {
-	r := text[i:]
-	if k >= 2 && text[k-2:k] == "${" {
-		// ${NAME=v} and ${NAME:=v} assign a default
-		return assign{ok: strings.HasPrefix(r, "=") || strings.HasPrefix(r, ":=")}
+// assignments checks NAME=value words: the prefix of a command (including
+// env's), a line of bare assignments, and export/declare operands.
+func (s *scanner) assignments(words []token, idx int) {
+	end := idx
+	if idx < 0 {
+		end = len(words)
 	}
-	if k >= 1 && text[k-1] == '$' {
-		return assign{} // an expansion reads the variable
-	}
-	if strings.HasPrefix(r, "+=") {
-		return assign{ok: true}
-	}
-	if strings.HasPrefix(r, "=") && !strings.HasPrefix(r, "==") {
-		v, known := shellValue(r[1:])
-		return assign{ok: true, known: known, value: v}
-	}
-	// code forms: skip closing quotes/brackets and blanks, then an operator
-	j := 0
-	for n := 0; j < len(r) && n < 4 && strings.IndexByte("\"'`]})>", r[j]) >= 0; n++ {
-		j++
-	}
-	for j < len(r) && (r[j] == ' ' || r[j] == '\t') {
-		j++
-	}
-	r = r[j:]
-	var op int
-	switch {
-	case strings.HasPrefix(r, "=>"), strings.HasPrefix(r, "?="), strings.HasPrefix(r, ":="):
-		op = 2
-	case strings.HasPrefix(r, "=="), strings.HasPrefix(r, "=~"), strings.HasPrefix(r, "::"):
-		return assign{}
-	case strings.HasPrefix(r, "+="):
-		return assign{ok: true}
-	case strings.HasPrefix(r, ","):
-		if !inSetter(text[:k]) {
-			return assign{} // get('NAME', default), a list element: a read
+	check := func(w token) {
+		name, v, ok := strings.Cut(w.text, "=")
+		if ok && strings.TrimSuffix(name, "+") == config.EnvReadOnly &&
+			readOnlyOff(assign{ok: true, known: !w.dynamic && !strings.HasSuffix(name, "+"), value: v}) {
+			s.reasons.add(reasonReadOnly)
 		}
-		op = 1
-	case strings.HasPrefix(r, "="), strings.HasPrefix(r, ":"):
-		op = 1
-	default:
-		return assign{}
 	}
-	v, known := codeValue(r[op:])
-	return assign{ok: true, known: known, value: v}
-}
-
-// inSetter reports whether the text before a quoted name opens a call to an
-// environment setter: setdefault(, putenv(, Setenv(, setenv(.
-func inSetter(before string) bool {
-	before = strings.TrimRight(before, "'\"` \t")
-	if !strings.HasSuffix(before, "(") {
-		return false
-	}
-	before = strings.TrimRight(strings.TrimSuffix(before, "("), " \t")
-	n := len(before)
-	for n > 0 && isNameChar(before[n-1]) {
-		n--
-	}
-	f := strings.ToLower(before[n:])
-	return strings.Contains(f, "set") || strings.Contains(f, "put")
-}
-
-// shellValue reads the value of a NAME=value shell word. known is false when
-// it has an expansion, a substitution or anything the guard cannot evaluate.
-func shellValue(r string) (string, bool) {
-	if r != "" && (r[0] == '\'' || r[0] == '"') {
-		end := strings.IndexByte(r[1:], r[0])
-		if end < 0 {
-			return "", false
+	for _, w := range words[:end] {
+		if assignRe.MatchString(w.text) {
+			check(w)
 		}
-		v := r[1 : 1+end]
-		return v, r[0] != '"' || !strings.ContainsAny(v, "$`\\")
 	}
-	n := 0
-	for n < len(r) && strings.IndexByte(" \t\r\n;&|)<>'\"", r[n]) < 0 {
-		n++
-	}
-	v := r[:n]
-	return v, !strings.ContainsAny(v, "$`(\\{")
-}
-
-// codeValue reads a literal after an assignment operator in code.
-func codeValue(r string) (string, bool) {
-	r = strings.TrimLeft(r, " \t")
-	p := 0
-	for p < 2 && p < len(r) && strings.IndexByte("rRbBuUfF", r[p]) >= 0 {
-		p++
-	}
-	if p < len(r) && strings.IndexByte("'\"`", r[p]) >= 0 {
-		q := r[p]
-		prefix := strings.ToLower(r[:p])
-		delim := string(q)
-		if strings.HasPrefix(r[p:], strings.Repeat(delim, 3)) {
-			delim = strings.Repeat(delim, 3)
-		}
-		body := r[p+len(delim):]
-		end := -1
-		for i := 0; i+len(delim) <= len(body); i++ {
-			if body[i] == '\\' {
-				i++
-				continue
-			}
-			if strings.HasPrefix(body[i:], delim) {
-				end = i
-				break
+	if idx >= 0 {
+		switch base(words[idx].text) {
+		case "export", "declare", "typeset", "local", "readonly":
+			for _, w := range words[idx+1:] {
+				if assignRe.MatchString(w.text) {
+					check(w)
+				}
 			}
 		}
-		if end < 0 {
-			return "", false
-		}
-		v := body[:end]
-		interp := strings.Contains(prefix, "f") && strings.Contains(v, "{") ||
-			q == '`' && strings.Contains(v, "${") ||
-			q == '"' && strings.ContainsAny(v, "$#\\") ||
-			strings.Contains(v, "\\")
-		return v, !interp && terminated(body[end+len(delim):])
 	}
-	n := 0
-	for n < len(r) && (isNameChar(r[n]) || strings.IndexByte(".+-", r[n]) >= 0) {
-		n++
-	}
-	v := r[:n]
-	if v == "" {
-		return "", false
-	}
-	literal := allDigits(v)
-	switch strings.ToLower(v) {
-	case "true", "false", "yes", "no", "on", "off":
-		literal = true
-	}
-	return v, literal && terminated(r[n:])
 }
 
-// terminated reports whether a literal ends its expression.
-func terminated(rest string) bool {
-	rest = strings.TrimLeft(rest, " \t")
-	return rest == "" || strings.IndexByte("\n\r;,)]}#&|'\"", rest[0]) >= 0 || strings.HasPrefix(rest, "//")
+// fallback*Re find visible invocations and assignments in a command the lexer can't read.
+var (
+	fallbackCallRe = regexp.MustCompile("(?:^|[\\s;&|(`])(?:\\S*/)?" + regexp.QuoteMeta(BinaryName) +
+		"((?:[ \\t]+[^\\s;&|)`]+)*)")
+	fallbackAssignRe = regexp.MustCompile(`(?:^|[\s;&|(])(?:export[ \t]+)?` + config.EnvReadOnly + `=([^\s;&|)]*)`)
+)
+
+// fallback checks a command the lexer can't read (bash can't run it either):
+// each visible invocation of the binary and each TGAC_READONLY= assignment.
+func (s *scanner) fallback(text string) {
+	for _, m := range fallbackCallRe.FindAllStringSubmatch(text, -1) {
+		var args []token
+		for _, f := range strings.Fields(m[1]) {
+			f = strings.Trim(f, `'"`)
+			args = append(args, token{kind: tWord, text: f, dynamic: strings.ContainsAny(f, "$`")})
+		}
+		s.reasons.add(checkInvocation(args, s.o))
+	}
+	for _, m := range fallbackAssignRe.FindAllStringSubmatch(text, -1) {
+		v := strings.Trim(m[1], `'"`)
+		if readOnlyOff(assign{ok: true, known: !strings.ContainsAny(v, "$`"), value: v}) {
+			s.reasons.add(reasonReadOnly)
+		}
+	}
 }
 
 // nameTargets returns variables a builtin assigns by name, and for each
@@ -393,7 +209,7 @@ func nameTargets(prog string, args []token) []struct {
 
 func literalWord(v string, known bool) assign { return assign{ok: true, known: known, value: v} }
 
-// envTargets checks builtins and loops that assign protected variables by name.
+// envTargets checks builtins and loops that assign TGAC_READONLY by name.
 func (s *scanner) envTargets(words []token, idx int) {
 	// for NAME in …; select NAME in …
 	for i := 0; i+1 < len(words); i++ {
@@ -401,10 +217,8 @@ func (s *scanner) envTargets(words []token, idx int) {
 		if keywords[t] {
 			continue
 		}
-		if t == "for" || t == "select" {
-			if k, ok := s.env[words[i+1].text]; ok {
-				s.reasons.add(reasonEnv(k, words[i+1].text))
-			}
+		if (t == "for" || t == "select") && words[i+1].text == config.EnvReadOnly {
+			s.reasons.add(reasonReadOnly)
 		}
 		break
 	}
@@ -412,19 +226,8 @@ func (s *scanner) envTargets(words []token, idx int) {
 		return
 	}
 	for _, t := range nameTargets(base(words[idx].text), words[idx+1:]) {
-		k, ok := s.env[t.name]
-		if !ok {
-			continue
-		}
-		if !t.value.ok {
-			// export NAME without a value: only the watcher variable counts
-			if k == envWatcher {
-				s.reasons.add(reasonEnv(k, t.name))
-			}
-			continue
-		}
-		if envValueBad(k, t.value) {
-			s.reasons.add(reasonEnv(k, t.name))
+		if t.name == config.EnvReadOnly && t.value.ok && readOnlyOff(t.value) {
+			s.reasons.add(reasonReadOnly)
 		}
 	}
 }

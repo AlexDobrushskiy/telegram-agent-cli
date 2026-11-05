@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+
+	"github.com/AlexDobrushskiy/telegram-agent-cli/internal/config"
 )
 
 // inputKeys are envelopes that carry a tool's input under another name; a
@@ -112,35 +114,31 @@ var pathKeys = set("path", "paths", "file_path", "filepath", "file", "filename",
 // terminalKeys hold text typed into a running shell or REPL (write_stdin).
 var terminalKeys = set("chars", "stdin")
 
-// fieldScan checks the strings of an unknown tool's input by their role, at
-// any depth and inside JSON-encoded strings: a nested command or code field
-// (a call inside the call: parallel tool uses, a dispatch) gets the Bash or
-// code checks, terminal input the Bash checks, setting a TGAC_ variable asks,
-// and every string gets the protected-path checks. Other text is data.
+// fieldScan checks an unknown tool's input at any depth, also inside
+// JSON-encoded strings: a nested command field (parallel tool uses, a
+// dispatch) and terminal input get the Bash checks, a TGAC_READONLY env key
+// that turns read-only off asks, and path fields and patch file lines get the
+// data-dir write check. Other text is data.
 type fieldScan struct {
 	tool string
 	o    Options
-	// content: the input is file content (a patch); only its paths count.
-	content bool
-	dirRes  []*regexp.Regexp
 }
 
 // scan returns why the fields need the owner's OK ("" = nothing found).
-// The top level's command and code fields are checkOtherTool's.
+// The top level's command fields are checkOtherTool's.
 func (f fieldScan) scan(fields map[string]any) string {
-	f.dirRes = dirPatterns(f.o)
 	return f.object(fields, true)
 }
 
 func (f fieldScan) object(m map[string]any, top bool) string {
-	if !top && !f.content {
+	if !top {
 		if r := f.calls(m); r != "" {
 			return r
 		}
 	}
 	for k, v := range m {
-		if !f.content && tgacKeyRe.MatchString(k) {
-			return f.tgacReason()
+		if v, isStr := v.(string); isStr && k == config.EnvReadOnly && readOnlyOff(assign{ok: true, known: true, value: v}) {
+			return "Telegram account action: this " + f.tool + " call " + reasonReadOnly
 		}
 		if r := f.value(k, v); r != "" {
 			return r
@@ -149,23 +147,16 @@ func (f fieldScan) object(m map[string]any, top bool) string {
 	return ""
 }
 
-// calls checks the command and code fields of a nested object.
+// calls checks the command fields of a nested object.
 func (f fieldScan) calls(m map[string]any) string {
 	var rs reasonSet
 	cmds, present, ok := commandsOf(m)
 	if present && !ok {
-		return reasonUnreadable("a command inside this " + f.tool + " call")
+		return ""
 	}
 	for _, c := range cmds {
 		for _, r := range CheckBash(c, f.o) {
 			rs.add(r)
-		}
-	}
-	for _, k := range codeKeys {
-		if code, isStr := m[k].(string); isStr {
-			for _, r := range CheckCode(code, f.o) {
-				rs.add(r)
-			}
 		}
 	}
 	if len(rs.list) == 0 {
@@ -203,41 +194,12 @@ func (f fieldScan) value(key string, v any) string {
 	return ""
 }
 
-var (
-	// invokeRe is the binary as a command word, bare or at the end of a path;
-	// a directory of that name (a checkout, telegram-agent-cli-wt/) is not one.
-	invokeRe = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_.-])` + regexp.QuoteMeta(BinaryName) +
-		"(?:$|[\\s'\"`;&|)\\]},])")
-	tgacVarRe = regexp.MustCompile(`\bTGAC_[A-Z]`)
-	// tgacSetRe sets a TGAC_ variable (TGAC_READONLY=0); tgacKeyRe is one as an env key.
-	tgacSetRe = regexp.MustCompile(`\bTGAC_[A-Z0-9_]+\s*\+?=`)
-	tgacKeyRe = regexp.MustCompile(`^TGAC_`)
-)
-
-func (f fieldScan) tgacReason() string {
-	return "Telegram account action: this " + f.tool + " call sets a TGAC_ variable (the guard's own switches)"
-}
-
 func (f fieldScan) text(key, s string) string {
-	if !f.content {
-		if tgacSetRe.MatchString(s) {
-			return f.tgacReason()
+	if terminalKeys[strings.ToLower(key)] {
+		if rs := CheckBash(s, f.o); len(rs) > 0 {
+			return "Telegram account action: this " + f.tool + " call types a command that needs the account owner's explicit OK (" +
+				strings.Join(rs, "; ") + ")"
 		}
-		if terminalKeys[strings.ToLower(key)] {
-			if rs := CheckBash(s, f.o); len(rs) > 0 {
-				return "Telegram account action: this " + f.tool + " call types a command that needs the account owner's explicit OK (" +
-					strings.Join(rs, "; ") + ")"
-			}
-		}
-	}
-	for _, re := range f.dirRes {
-		if re.MatchString(s) {
-			return "Telegram account data: " + f.tool + " " + reasonDataDir
-		}
-	}
-	settings := "Telegram account guard: " + f.tool + " touches agent settings or hook config"
-	if namesCodexHook(s, f.o) || settingsCodeRe.MatchString(s) {
-		return settings
 	}
 	var targets []string
 	for _, m := range patchFileRe.FindAllStringSubmatch(s, -1) {
@@ -247,11 +209,7 @@ func (f fieldScan) text(key, s string) string {
 		targets = append(targets, s)
 	}
 	for _, t := range targets {
-		p := absPath(t, f.o)
-		if settingsTarget(p, f.o) {
-			return settings
-		}
-		if r := CheckFile("Write", p, f.o); r != "" {
+		if r := CheckFile("Write", absPath(t, f.o), f.o); r != "" {
 			return "Telegram account data: " + f.tool + " " + r
 		}
 	}

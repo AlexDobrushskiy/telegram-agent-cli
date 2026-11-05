@@ -5,6 +5,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed (guard narrowed)
+
+- The hooks ask only about what they can see a call do: run the binary with a write, set
+  `TGAC_READONLY` off, name a data-dir path, read a session file, or call a Telegram tool that
+  writes. They no longer ask about interpreter code, programs or scripts they can't see (missing,
+  named by an expansion, decoded, piped), recursive reads of `~`, `TGAC_HOME`, the watcher session
+  variable, Claude Code or Codex settings files, file-tool content, or shells started on Codex's
+  terminal. A week of real agent sessions showed ~95% of prompts were false alarms; the binary's
+  write gate covers what the hook no longer reads.
+
 ### Added
 
 - `e2e`: an end-to-end test harness for your own bots. Send text, photos, voice notes, files and

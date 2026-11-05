@@ -51,35 +51,19 @@ var secretFiles = map[string]bool{
 	"config.json": true, "session.json": true, "peers.json": true, "pending-login.json": true,
 }
 
-var (
-	// an assignment or expansion of TGAC_HOME, in shell or code; a bare mention is fine
-	homeVarRe = regexp.MustCompile(`TGAC_HOME\+?=|\$\{?TGAC_HOME\b|TGAC_HOME["'\])]+\s*(?:=|:|,)|\b(?i:environ|getenv|printenv|env)\W{0,3}TGAC_HOME\b`)
-	rawLibRe  = regexp.MustCompile(`(?i)\b(telethon|gotd|pyrogram|gramjs|mtproto)\b`)
-	rawSessRe = regexp.MustCompile(`(?i)session\.json|\.session\b|StringSession|TelegramClient|FileStorage|auth_key`)
-	mentionRe = regexp.MustCompile(`(?i)` + regexp.QuoteMeta(BinaryName))
-)
+var mentionRe = regexp.MustCompile(`(?i)` + regexp.QuoteMeta(BinaryName))
 
 // Options configures a check. Zero values fall back to the real environment.
 type Options struct {
 	DataDirs []string                          // data dirs to protect (absolute)
 	UserHome string                            // for ~ and $HOME forms
 	Cwd      string                            // base for relative paths
-	ReadFile func(path string) ([]byte, error) // script files named in a command
-	// WatcherEnvs are the watcher session variable names (config watcher_session_env);
-	// the default name is always included.
-	WatcherEnvs []string
+	ReadFile func(path string) ([]byte, error) // shell scripts named in a command
 	// XDGConfigHome is $XDG_CONFIG_HOME ("" = ~/.config).
 	XDGConfigHome string
-	// ClaudeConfigDir is $CLAUDE_CONFIG_DIR; ~/.claude and every .claude dir are always protected.
-	ClaudeConfigDir string
 	// E2EAllowed are the e2e.allowed_chats entries of the data dirs' config.json.
 	E2EAllowed []string
-	// CodexHome is $CODEX_HOME; hooks.json/config.toml there and in every .codex dir are protected.
-	CodexHome string
-	// TerminalStdin: a command's stdin may be a terminal that another tool types
-	// into unchecked (Codex's write_stdin), so a shell or REPL reading it is asked about.
-	TerminalStdin bool
-	Deadline      time.Duration // Run's time budget (DefaultDeadline if zero)
+	Deadline   time.Duration // Run's time budget (DefaultDeadline if zero)
 }
 
 // DefaultOptions protects $TGAC_HOME (if set) and the default data dir.
@@ -95,11 +79,8 @@ func DefaultOptions() Options {
 			o.DataDirs = append(o.DataDirs, def)
 		}
 	}
-	o.WatcherEnvs = WatcherEnvsFor(o.DataDirs)
 	o.E2EAllowed = E2EAllowedFor(o.DataDirs)
 	o.XDGConfigHome = os.Getenv("XDG_CONFIG_HOME")
-	o.ClaudeConfigDir = os.Getenv("CLAUDE_CONFIG_DIR")
-	o.CodexHome = os.Getenv("CODEX_HOME")
 	return o
 }
 
@@ -161,66 +142,8 @@ func (r *reasonSet) add(s string) {
 // CheckBash returns why a Bash command needs the owner's OK (nil = let it run).
 func CheckBash(cmd string, o Options) []string {
 	s := newScanner(o)
-	text := s.scanTop(cmd)
-	s.rawRules(text)
+	s.scanTop(cmd)
 	return s.reasons.list
-}
-
-// CheckCode returns why code a tool runs (a JavaScript REPL, a run-code tool)
-// needs the owner's OK, with the interpreter-code rules (nil = let it run).
-func CheckCode(code string, o Options) []string {
-	s := newScanner(o)
-	s.code(code, ctx{})
-	s.finish(code)
-	s.rawRules(code)
-	return s.reasons.list
-}
-
-// rawRules are text checks that apply anywhere, code or shell.
-func (s *scanner) rawRules(text string) {
-	s.envText(text)
-	if homeVarRe.MatchString(text) {
-		s.reasons.add("sets or reads " + config.EnvHome)
-	}
-	for _, re := range s.dirRes {
-		if re.MatchString(text) {
-			s.reasons.add("touches the " + BinaryName + " data dir (session keys, config, watcher registry)")
-			break
-		}
-	}
-	if rawLibRe.MatchString(text) && rawSessRe.MatchString(text) {
-		s.reasons.add("raw MTProto client code next to a session")
-	}
-}
-
-// dirPatterns matches the data dirs in absolute, ~, $HOME and ${HOME} forms, plus
-// the default location in any form. A longer name (telegram-agent-cli-notes) is not the dir.
-func dirPatterns(o Options) []*regexp.Regexp {
-	forms := []string{"/.config/" + BinaryName, "XDG_CONFIG_HOME}/" + BinaryName, "XDG_CONFIG_HOME/" + BinaryName}
-	for _, d := range o.DataDirs {
-		d = filepath.Clean(d)
-		forms = append(forms, d)
-		if real, err := filepath.EvalSymlinks(d); err == nil && real != d {
-			forms = append(forms, real)
-		}
-		if o.UserHome != "" {
-			if rel, ok := strings.CutPrefix(d, filepath.Clean(o.UserHome)+"/"); ok {
-				forms = append(forms, "~/"+rel, "$HOME/"+rel, "${HOME}/"+rel)
-			}
-		}
-	}
-	const right = `(?:$|[^A-Za-z0-9_.-])`
-	var res []*regexp.Regexp
-	for _, f := range forms {
-		left := `(?:^|[^A-Za-z0-9_-])`
-		if strings.HasPrefix(f, "/") {
-			left = ""
-		}
-		res = append(res, regexp.MustCompile(`(?i)`+left+regexp.QuoteMeta(f)+right))
-	}
-	// relative ".config/<name>" at a word start
-	res = append(res, regexp.MustCompile(`(?i)(?:^|[\s"'=:(])\.config/`+regexp.QuoteMeta(BinaryName)+right))
-	return res
 }
 
 // CheckFile returns why a file tool call needs the owner's OK ("" = allow).
